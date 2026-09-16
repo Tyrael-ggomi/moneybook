@@ -180,10 +180,45 @@ def json_response(
     payload,
     status=HTTPStatus.OK
 ):
+    def json_default(obj):
+        if isinstance(obj, (datetime, date)):
+            return obj.isoformat()
+
+        try:
+            # PostgreSQL Decimal 등 숫자형 대응
+            if hasattr(obj, 'as_integer_ratio'):
+                return float(obj)
+        except Exception:
+            pass
+
+        return str(obj)
+
     raw = json.dumps(
         payload,
-        ensure_ascii=False
+        ensure_ascii=False,
+        default=json_default
     ).encode('utf-8')
+
+    handler.send_response(status)
+
+    handler.send_header(
+        'Content-Type',
+        'application/json; charset=utf-8'
+    )
+
+    handler.send_header(
+        'Content-Length',
+        str(len(raw))
+    )
+
+    handler.send_header(
+        'Cache-Control',
+        'no-store'
+    )
+
+    handler.end_headers()
+
+    handler.wfile.write(raw)
 
     handler.send_response(status)
     handler.send_header(
