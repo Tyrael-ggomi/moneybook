@@ -1341,6 +1341,7 @@ def api_import_transactions(handler):
                 )
 
             try:
+
                 prepared.append(
                     validate_transaction_payload(
                         conn,
@@ -1349,37 +1350,41 @@ def api_import_transactions(handler):
                 )
 
             except Exception as e:
+
                 raise ValueError(
                     f'{i}번째 행: {e}'
                 )
 
-        # 중요:
-        # 기존 코드에는 여기에서 "values"라는
-        # 존재하지 않는 변수를 INSERT하고 있었음.
+        # -------------------------------------------------
+        # 대량 입력
         #
-        # 대량 입력에서는 prepared 전체를 executemany로 저장한다.
+        # executemany() 대신 각 행을 개별 INSERT
+        # prepared statement 충돌을 피한다.
+        # -------------------------------------------------
 
-        conn.executemany(
-            """
-            INSERT INTO transactions
-            (
-                tx_date,
-                tx_time,
-                amount,
-                card_id,
-                category_id,
-                content,
-                user_percent,
-                wife_percent,
-                installment_months
+        for values in prepared:
+
+            conn.execute(
+                """
+                INSERT INTO transactions
+                (
+                    tx_date,
+                    tx_time,
+                    amount,
+                    card_id,
+                    category_id,
+                    content,
+                    user_percent,
+                    wife_percent,
+                    installment_months
+                )
+                VALUES
+                (
+                    ?,?,?,?,?,?,?,?,?
+                )
+                """,
+                values
             )
-            VALUES
-            (
-                ?,?,?,?,?,?,?,?,?
-            )
-            """,
-            prepared
-        )
 
         conn.commit()
 
@@ -1390,7 +1395,6 @@ def api_import_transactions(handler):
             'count': len(prepared)
         }
     )
-
 
 # =========================================================
 # Notes
