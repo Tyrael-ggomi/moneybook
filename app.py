@@ -16,7 +16,7 @@ from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs, urlsplit, urlunsplit, parse_qsl, urlencode
+from urllib.parse import urlparse, parse_qs
 
 APP_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
@@ -29,19 +29,7 @@ INTEGRITY_ERROR = (sqlite3.IntegrityError,) if not USING_POSTGRES else (psycopg.
 
 def postgres_conninfo(url):
     """Make Supabase pooler URLs compatible with psycopg."""
-    parts = urlsplit(url)
-    query = [
-        (key, value)
-        for key, value in parse_qsl(parts.query, keep_blank_values=True)
-        if key.lower() != 'pgbouncer'
-    ]
-    return urlunsplit((
-        parts.scheme,
-        parts.netloc,
-        parts.path,
-        urlencode(query),
-        parts.fragment
-    ))
+    return re.sub(r'([?&])pgbouncer=[^&]*&?', r'\1', url).rstrip('?&')
 
 
 class DBConn:
