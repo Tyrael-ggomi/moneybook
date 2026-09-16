@@ -268,9 +268,15 @@ def api_add_transaction(handler):
     data=parse_body(handler)
     with db() as conn:
         values=validate_transaction_payload(conn,data)
-        cur=conn.execute("INSERT INTO transactions (tx_date,tx_time,amount,card_id,category_id,content,user_percent,wife_percent,installment_months) VALUES (?,?,?,?,?,?,?,?,?)",values)
+        cur=conn.execute(
+            "INSERT INTO transactions "
+            "(tx_date,tx_time,amount,card_id,category_id,content,user_percent,wife_percent,installment_months) "
+            "VALUES (?,?,?,?,?,?,?,?,?) RETURNING id",
+            values
+        )
+        new_id=cur.fetchone()['id']
         conn.commit()
-    json_response(handler,{"ok":True,"id":cur.lastrowid})
+    json_response(handler,{"ok":True,"id":new_id})
 
 def api_check_duplicates(handler):
     data=parse_body(handler)
