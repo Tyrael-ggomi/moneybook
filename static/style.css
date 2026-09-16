@@ -18,4 +18,33 @@ body{padding-bottom:calc(76px + env(safe-area-inset-bottom))}
 .importBtn{width:100%;height:44px;margin-top:8px;background:#fff;border-color:#d1d5db}.importModalBox textarea{width:100%;margin-top:6px;border:1px solid #d1d5db;border-radius:12px;padding:12px;font:inherit;font-size:14px;line-height:1.5;resize:vertical}.importHelp{font-size:12px;color:#6b7280;margin:-5px 2px 14px}.importRatioHint{font-size:12px;color:#6b7280;margin:-5px 2px 12px}.importRatioHint strong{color:#111827;font-size:14px}.importPreview{max-height:260px;overflow:auto;border:1px solid #e5e7eb;border-radius:12px;background:#f9fafb;margin:8px 0 12px}.importSummary{padding:11px 12px;font-size:13px;font-weight:800;border-bottom:1px solid #e5e7eb}.importRow{display:grid;grid-template-columns:76px 1fr auto;gap:8px;padding:9px 12px;border-bottom:1px solid #eee;font-size:12px;align-items:center}.importRow:last-child{border-bottom:0}.importRow .store{font-weight:700;min-width:0;overflow-wrap:anywhere}.importRow .dateTime{color:#6b7280}.importRow .amt{font-weight:900;white-space:nowrap}.importBad{color:#b91c1c;background:#fef2f2}.importDup{color:#92400e;background:#fff7ed}.importRow small{display:block;font-size:10px;font-weight:500;margin-top:2px;line-height:1.35}.importWarn{color:#92400e;background:#fffbeb}.importEmpty{padding:22px 12px;text-align:center;color:#9ca3af;font-size:13px}@media(max-width:420px){.importRow{grid-template-columns:68px 1fr auto;gap:6px;padding-left:9px;padding-right:9px}}
 
 .importFixedHint{height:48px;margin-top:6px;padding:8px 12px;border:1px solid #e5e7eb;border-radius:12px;background:#f9fafb;font-size:12px;color:#6b7280;line-height:1.25}.importFixedHint strong{color:#111827}.importFixedHint b{color:#b45309}.settingsOrder{display:flex;flex-direction:column;gap:3px;flex:0 0 34px}.settingsOrder:empty{display:none}.settingsOrder .orderBtn{width:34px;height:22px;padding:0;font-size:12px;line-height:20px;border-radius:7px}.settingsOrder+.settingsMain{min-width:0}
-input[type=date],input[type=time]{min-width:0;max-width:100%;width:100%;box-sizing:border-box}
+
+/* 날짜 / 시간 입력칸 좌우 정렬 통일 */
+input[type="date"],
+input[type="time"]{
+  display:block;
+  width:100%;
+  min-width:0;
+  max-width:none;
+  height:48px;
+  margin-top:6px;
+  padding:0 13px;
+  box-sizing:border-box;
+  border:1px solid #d1d5db;
+  border-radius:12px;
+  background:#fff;
+  font:inherit;
+  font-size:16px;
+  color:#111827;
+}
+
+/* 날짜/시간 입력의 브라우저 기본 내부 영역까지 동일하게 */
+input[type="date"]::-webkit-date-and-time-value,
+input[type="time"]::-webkit-date-and-time-value{
+  text-align:left;
+}
+
+/* 검색 시작일/종료일도 동일 기준 */
+.filters input[type="date"]{
+  width:100%;
+}
