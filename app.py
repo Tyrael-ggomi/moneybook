@@ -830,9 +830,9 @@ def api_transactions(handler):
             (*args, limit)
         ).fetchall()
 
-        total = conn.execute(
+        total_row = conn.execute(
             """
-            SELECT COUNT(*)
+            SELECT COUNT(*) AS total
             FROM transactions t
             LEFT JOIN cards c
               ON c.id=t.card_id
@@ -841,18 +841,20 @@ def api_transactions(handler):
             """
             + clause,
             args
-        ).fetchone()[0]
-
-    json_response(
-        handler,
-        {
-            'transactions': [
-                dict(r)
-                for r in rows
-            ],
-            'total': total
-        }
-    )
+        ).fetchone()
+        
+        total = int(total_row['total'])
+        
+        json_response(
+            handler,
+            {
+                'transactions': [
+                    dict(r)
+                    for r in rows
+                ],
+                'total': total
+            }
+        )
 
 
 # =========================================================
@@ -1806,16 +1808,18 @@ def api_settings(
 
                 try:
 
-                    max_order = conn.execute(
+                    order_row = conn.execute(
                         f"""
                         SELECT
                             COALESCE(
                                 MAX(sort_order),
                                 -1
-                            )
+                            ) AS max_order
                         FROM {table}
                         """
-                    ).fetchone()[0]
+                    ).fetchone()
+                    
+                    max_order = int(order_row['max_order'])
 
                     if kind == 'cards':
 
