@@ -16,7 +16,7 @@ from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import urlparse, parse_qs
+from urllib.parse import urlparse, parse_qs, urlsplit, urlunsplit, parse_qsl, urlencode
 
 APP_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
@@ -28,6 +28,22 @@ INTEGRITY_ERROR = (sqlite3.IntegrityError,) if not USING_POSTGRES else (psycopg.
 
 
 class DBConn:
+    def postgres_conninfo(url):
+        """Make Supabase pooler URLs compatible with psycopg."""
+        parts = urlsplit(url)
+        query = [
+            (key, value)
+            for key, value in parse_qsl(parts.query, keep_blank_values=True)
+            if key.lower() != 'pgbouncer'
+        ]
+        return urlunsplit((
+            parts.scheme,
+            parts.netloc,
+            parts.path,
+            urlencode(query),
+            parts.fragment
+        ))
+    
     def __init__(self, raw, postgres=False):
         self.raw = raw
         self.postgres = postgres
@@ -60,7 +76,7 @@ def db():
     if USING_POSTGRES:
         if psycopg is None:
             raise RuntimeError('PostgreSQL 연결 모듈이 없습니다. requirements.txt를 확인하세요.')
-        return DBConn(psycopg.connect(DATABASE_URL, row_factory=dict_row), postgres=True)
+        return DBConn(psycopg.connect(postgres_conninfo(DATABASE_URL), row_factory=dict_row), postgres=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
