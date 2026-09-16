@@ -27,23 +27,24 @@ USING_POSTGRES = bool(DATABASE_URL)
 INTEGRITY_ERROR = (sqlite3.IntegrityError,) if not USING_POSTGRES else (psycopg.errors.UniqueViolation, psycopg.errors.ForeignKeyViolation) if psycopg else (Exception,)
 
 
+def postgres_conninfo(url):
+    """Make Supabase pooler URLs compatible with psycopg."""
+    parts = urlsplit(url)
+    query = [
+        (key, value)
+        for key, value in parse_qsl(parts.query, keep_blank_values=True)
+        if key.lower() != 'pgbouncer'
+    ]
+    return urlunsplit((
+        parts.scheme,
+        parts.netloc,
+        parts.path,
+        urlencode(query),
+        parts.fragment
+    ))
+
+
 class DBConn:
-    def postgres_conninfo(url):
-        """Make Supabase pooler URLs compatible with psycopg."""
-        parts = urlsplit(url)
-        query = [
-            (key, value)
-            for key, value in parse_qsl(parts.query, keep_blank_values=True)
-            if key.lower() != 'pgbouncer'
-        ]
-        return urlunsplit((
-            parts.scheme,
-            parts.netloc,
-            parts.path,
-            urlencode(query),
-            parts.fragment
-        ))
-    
     def __init__(self, raw, postgres=False):
         self.raw = raw
         self.postgres = postgres
