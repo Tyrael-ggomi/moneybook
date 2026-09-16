@@ -18,7 +18,49 @@ async function saveEdit(e){e.preventDefault();let p={date:$('editDate').value,ti
 async function del(){if(!editingId)return;let t=lastTransactions.find(x=>x.id===editingId);if(!confirm(`${t?.tx_date||''} / ${t?.content||'(내용 없음)'} / ${money(t?.amount||0)}\n\n정말 삭제할까요?`))return;try{let r=await fetch('/api/transactions/'+editingId,{method:'DELETE'}),d=await r.json();if(!r.ok||!d.ok)throw Error(d.error);closeEdit();msg('삭제했습니다.',true);await list()}catch(e){msg(e.message)}}
 let timer;function filter(){clearTimeout(timer);timer=setTimeout(()=>list().catch(e=>msg(e.message)),250)}
 $('expenseForm').onsubmit=submit;$('ratio').oninput=ratio;$('amount').oninput=()=>fmt('amount');$('resetBtn').onclick=()=>reset();$('editForm').onsubmit=saveEdit;$('editRatio').oninput=eratio;$('editAmount').oninput=()=>fmt('editAmount');$('closeModal').onclick=closeEdit;$('deleteBtn').onclick=del;$('editModal').onclick=e=>{if(e.target.id==='editModal')closeEdit()};$('search').oninput=filter;$('filterReset').onclick=()=>{['search','dateFrom','dateTo'].forEach(id=>$(id).value='');$('filterCard').value='';$('filterCategory').value='';list().catch(e=>msg(e.message))};['dateFrom','dateTo','filterCard','filterCategory'].forEach(id=>$(id).onchange=()=>list().catch(e=>msg(e.message)));
-inst('installment');inst('editInstallment');$('date').value=new Date().toISOString().slice(0,10);$('time').value=new Date().toTimeString().slice(0,5);ratio();fetch('/api/bootstrap').then(r=>r.json()).then(x=>{boot=x;selects();return list()}).catch(e=>{$('dbStatus').textContent='연결 실패';msg(e.message)})
+inst('installment');
+inst('editInstallment');
+
+$('date').value = new Date().toISOString().slice(0,10);
+$('time').value = new Date().toTimeString().slice(0,5);
+ratio();
+
+async function initializeApp(){
+  try{
+    $('dbStatus').textContent = 'DB 확인 중…';
+
+    const bootstrapResponse = await fetch('/api/bootstrap');
+    const bootstrapData = await bootstrapResponse.json();
+
+    if(!bootstrapResponse.ok){
+      throw new Error(
+        'bootstrap API 오류: ' +
+        (bootstrapData.error || bootstrapResponse.status)
+      );
+    }
+
+    boot = bootstrapData;
+
+    selects();
+
+    $('dbStatus').textContent = 'DB 연결됨';
+
+    try{
+      await list();
+    }catch(e){
+      console.error('transactions 로딩 오류:', e);
+      throw new Error('지출내역 로딩 오류: ' + e.message);
+    }
+
+  }catch(e){
+    console.error('머니북 초기화 오류:', e);
+
+    $('dbStatus').textContent = '오류';
+    msg(e.message || String(e));
+  }
+}
+
+initializeApp();
 
 let settlementCenter = new Date();
 settlementCenter.setDate(1);
