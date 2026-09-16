@@ -2461,7 +2461,6 @@ def api_settings_delete(
         }
     )
 
-
 # =========================================================
 # Settlement
 # =========================================================
@@ -2573,6 +2572,17 @@ def api_settlement(handler):
             )
         )
 
+    # ---------------------------------------------------------
+    # 카드 결산기간
+    #
+    # period_start_day를 결산월의 경계로 사용
+    #
+    # 예:
+    # 시작일 6일 → 10/6 ~ 11/5 = 11월분
+    # 시작일 7일 → 10/7 ~ 11/6 = 11월분
+    # 시작일 9일 → 10/9 ~ 11/8 = 11월분
+    # ---------------------------------------------------------
+
     def period_for(
         target_ym,
         card
@@ -2583,18 +2593,9 @@ def api_settlement(handler):
             target_ym.split('-')
         )
 
-        sd = card[
-            'period_start_day'
-        ]
+        sd = card['period_start_day']
 
-        ed = card[
-            'period_end_day'
-        ]
-
-        if (
-            sd is None
-            or ed is None
-        ):
+        if sd is None:
 
             return (
                 date(y, m, 1),
@@ -2605,69 +2606,67 @@ def api_settlement(handler):
                 )
             )
 
-        py, pm = shift_month(
+        sd = int(sd)
+
+        start = safe_date(
             y,
             m,
-            -1
+            sd
+        )
+
+        ny, nm = shift_month(
+            y,
+            m,
+            1
+        )
+
+        next_start = safe_date(
+            ny,
+            nm,
+            sd
+        )
+
+        end = next_start.fromordinal(
+            next_start.toordinal() - 1
         )
 
         return (
-            safe_date(
-                py,
-                pm,
-                int(sd)
-            ),
-            safe_date(
-                y,
-                m,
-                int(ed)
-            )
+            start,
+            end
         )
+
+    # ---------------------------------------------------------
+    # 지출일 → 결산월
+    # ---------------------------------------------------------
 
     def settlement_month(
         txdate,
         card
     ):
 
-        if (
-            card['period_start_day']
-            is None
-            or
-            card['period_end_day']
-            is None
-        ):
+        start_day = card['period_start_day']
+
+        if start_day is None:
+
             return txdate.strftime(
                 '%Y-%m'
             )
 
-        for off in (
-            -1,
-            0,
-            1,
-            2
-        ):
+        start_day = int(start_day)
 
-            yy, mm = shift_month(
-                txdate.year,
-                txdate.month,
-                off
+        if txdate.day >= start_day:
+
+            return txdate.strftime(
+                '%Y-%m'
             )
 
-            target = (
-                f'{yy:04d}-{mm:02d}'
-            )
-
-            a, b = period_for(
-                target,
-                card
-            )
-
-            if a <= txdate <= b:
-                return target
-
-        return txdate.strftime(
-            '%Y-%m'
+        yy, mm = shift_month(
+            txdate.year,
+            txdate.month,
+            -1
         )
+
+        return f'{yy:04d}-{mm:02d}'
 
     with db() as conn:
 
@@ -2766,7 +2765,10 @@ def api_settlement(handler):
 
         purchase = (
             r['tx_date']
-            if isinstance(r['tx_date'], date)
+            if isinstance(
+                r['tx_date'],
+                date
+            )
             else date.fromisoformat(
                 str(r['tx_date'])
             )
@@ -2889,7 +2891,9 @@ def api_settlement(handler):
         handler,
         {
             'center_month':
-                center_dt.strftime('%Y-%m'),
+                center_dt.strftime(
+                    '%Y-%m'
+                ),
 
             'user_name':
                 settings.get(
@@ -2906,7 +2910,6 @@ def api_settlement(handler):
             'months': result
         }
     )
-
 
 # =========================================================
 # HTTP Handler
