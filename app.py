@@ -118,12 +118,13 @@ def db():
             )
 
         return DBConn(
-            psycopg.connect(
-                postgres_conninfo(DATABASE_URL),
-                row_factory=dict_row
-            ),
-            postgres=True
-        )
+    psycopg.connect(
+        postgres_conninfo(DATABASE_URL),
+        row_factory=dict_row,
+        prepare_threshold=None
+    ),
+    postgres=True
+)
 
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
