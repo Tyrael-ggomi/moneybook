@@ -380,6 +380,12 @@ def normalize_date(value):
         '날짜 형식이 올바르지 않습니다.'
     )
 
+def to_date(value):
+    if isinstance(value, datetime):
+        return value.date()
+    if isinstance(value, date):
+        return value
+    return date.fromisoformat(str(value))
 
 def normalize_time(value):
     s = str(value or '').strip()
@@ -2758,8 +2764,12 @@ def api_settlement(handler):
         if not card:
             continue
 
-        purchase = date.fromisoformat(
+        purchase = (
             r['tx_date']
+            if isinstance(r['tx_date'], date)
+            else date.fromisoformat(
+                str(r['tx_date'])
+            )
         )
 
         first = settlement_month(
