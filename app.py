@@ -5,6 +5,13 @@ import os
 import re
 import shutil
 import sqlite3
+
+try:
+    import psycopg
+    from psycopg.rows import dict_row
+except ImportError:
+    psycopg = None
+    dict_row = None
 from datetime import date, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -12,17 +19,53 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 
 APP_DIR = Path(__file__).resolve().parent
+DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
 DB_PATH = Path(os.environ.get('MONEYBOOK_DB', APP_DIR / 'moneybook.db')).resolve()
 HOST = os.environ.get('MONEYBOOK_HOST', '0.0.0.0')
-PORT = int(os.environ.get('MONEYBOOK_PORT', '8765'))
+PORT = int(os.environ.get('PORT', os.environ.get('MONEYBOOK_PORT', '8765')))
+USING_POSTGRES = bool(DATABASE_URL)
+INTEGRITY_ERROR = (sqlite3.IntegrityError,) if not USING_POSTGRES else (psycopg.errors.UniqueViolation, psycopg.errors.ForeignKeyViolation) if psycopg else (Exception,)
+
+
+class DBConn:
+    def __init__(self, raw, postgres=False):
+        self.raw = raw
+        self.postgres = postgres
+
+    def __enter__(self):
+        self.raw.__enter__()
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        return self.raw.__exit__(exc_type, exc, tb)
+
+    def _sql(self, sql):
+        return sql.replace('?', '%s') if self.postgres else sql
+
+    def execute(self, sql, params=()):
+        return self.raw.execute(self._sql(sql), params)
+
+    def executemany(self, sql, params):
+        return self.raw.executemany(self._sql(sql), params)
+
+    def commit(self):
+        return self.raw.commit()
+
+    def close(self):
+        return self.raw.close()
 
 
 def db():
+    """Render/Supabase uses PostgreSQL; local development continues to use SQLite."""
+    if USING_POSTGRES:
+        if psycopg is None:
+            raise RuntimeError('PostgreSQL 연결 모듈이 없습니다. requirements.txt를 확인하세요.')
+        return DBConn(psycopg.connect(DATABASE_URL, row_factory=dict_row), postgres=True)
     conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     conn.execute('PRAGMA foreign_keys=ON')
     conn.execute('PRAGMA busy_timeout=3000')
-    return conn
+    return DBConn(conn, postgres=False)
 
 
 def json_response(handler, payload, status=HTTPStatus.OK):
@@ -87,7 +130,13 @@ def get_settings(conn):
 
 
 def ensure_schema():
-    """Add fields introduced after the original v0.4 schema without touching existing data."""
+    """Keep the local SQLite schema compatible; Supabase schema is created by migration SQL."""
+    if USING_POSTGRES:
+        with db() as conn:
+            required = conn.execute("SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('cards','categories','transactions','settings','auto_rules','notes')").fetchone()
+            if not required or int(required['n']) != 6:
+                raise RuntimeError('Supabase DB에 Moneybook 테이블이 아직 모두 만들어지지 않았습니다.')
+        return
     with db() as conn:
         tx_cols={r[1] for r in conn.execute("PRAGMA table_info(transactions)").fetchall()}
         if 'tx_time' not in tx_cols:
@@ -344,7 +393,7 @@ def api_settings(handler, kind=None, item_id=None):
                         cur = conn.execute(f"INSERT INTO {table}(name,active,sort_order,payment_day,period_start_day,period_end_day) VALUES(?,1,?,?,?,?)", (name,max_order+1,pd,sd,ed))
                     else:
                         cur = conn.execute(f"INSERT INTO {table}(name,active,sort_order) VALUES(?,1,?)", (name,max_order+1))
-                except sqlite3.IntegrityError: raise ValueError('이미 같은 이름이 있습니다.')
+                except INTEGRITY_ERROR: raise ValueError('이미 같은 이름이 있습니다.')
                 conn.commit(); json_response(handler, {'ok':True,'id':cur.lastrowid}); return
             if method == 'POST' and item_id is not None:
                 try:
@@ -356,7 +405,7 @@ def api_settings(handler, kind=None, item_id=None):
                         cur=conn.execute(f"UPDATE {table} SET name=?, active=?, payment_day=?, period_start_day=?, period_end_day=? WHERE id=?", (name,1 if data.get('active',True) else 0,pd,sd,ed,item_id))
                     else:
                         cur=conn.execute(f"UPDATE {table} SET name=?, active=? WHERE id=?", (name,1 if data.get('active',True) else 0,item_id))
-                except sqlite3.IntegrityError: raise ValueError('이미 같은 이름이 있습니다.')
+                except INTEGRITY_ERROR: raise ValueError('이미 같은 이름이 있습니다.')
                 if not cur.rowcount: raise ValueError('항목을 찾을 수 없습니다.')
                 conn.commit(); json_response(handler, {'ok':True,'id':item_id}); return
 
@@ -370,12 +419,12 @@ def api_settings(handler, kind=None, item_id=None):
             if method == 'POST' and item_id is None:
                 try:
                     cur=conn.execute("INSERT INTO auto_rules(keyword,category_id,active) VALUES(?,?,1)",(keyword,category_id))
-                except sqlite3.IntegrityError: raise ValueError('이미 같은 키워드가 있습니다.')
+                except INTEGRITY_ERROR: raise ValueError('이미 같은 키워드가 있습니다.')
                 conn.commit(); json_response(handler, {'ok':True,'id':cur.lastrowid}); return
             if method == 'POST' and item_id is not None:
                 try:
                     cur=conn.execute("UPDATE auto_rules SET keyword=?,category_id=?,active=? WHERE id=?",(keyword,category_id,1 if data.get('active',True) else 0,item_id))
-                except sqlite3.IntegrityError: raise ValueError('이미 같은 키워드가 있습니다.')
+                except INTEGRITY_ERROR: raise ValueError('이미 같은 키워드가 있습니다.')
                 if not cur.rowcount: raise ValueError('자동분류 규칙을 찾을 수 없습니다.')
                 conn.commit(); json_response(handler, {'ok':True,'id':item_id}); return
         raise ValueError('지원하지 않는 설정 요청입니다.')
@@ -553,7 +602,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ensure_schema()
-    print('머니북 모바일 v0.6.3')
+    print('머니북 모바일 v0.6.5 (Supabase-ready)')
     print(f'DB: {DB_PATH}')
     print(f'Open: http://127.0.0.1:{PORT}')
     server = ThreadingHTTPServer((HOST, PORT), Handler)
