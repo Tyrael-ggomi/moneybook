@@ -587,6 +587,56 @@ def api_settlement(handler):
     json_response(handler,{'center_month':center_dt.strftime('%Y-%m'),'user_name':settings.get('user_name','나'),'wife_name':settings.get('wife_name','배우자'),'months':result})
 
 
+def api_settlement_details(handler):
+    q=parse_qs(urlparse(handler.path).query)
+    month=q.get('month',[''])[0]
+    kind=q.get('kind',['total'])[0]
+    item_id=q.get('id',[''])[0]
+    if not re.fullmatch(r'\\d{4}-\\d{2}',month): raise ValueError('결산 월이 올바르지 않습니다.')
+    allowed={'total','user','wife','card','category'}
+    if kind not in allowed: raise ValueError('결산 항목이 올바르지 않습니다.')
+    if kind in ('card','category') and not item_id: raise ValueError('결산 항목 ID가 없습니다.')
+    center_dt=date.fromisoformat(month+'-01')
+    def shift_month(y,m,offset):
+        total=y*12+(m-1)+offset; return total//12,total%12+1
+    def add_month(ymv,n):
+        y,m=map(int,ymv.split('-')); yy,mm=shift_month(y,m,n); return f'{yy:04d}-{mm:02d}'
+    def safe_date(y,m,d):
+        import calendar
+        return date(y,m,min(d,calendar.monthrange(y,m)[1]))
+    def period_for(target_ym,card):
+        y,m=map(int,target_ym.split('-')); sd=card['period_start_day']; ed=card['period_end_day']
+        if sd is None or ed is None: return date(y,m,1),safe_date(y,m,31)
+        py,pm=shift_month(y,m,-1); return safe_date(py,pm,int(sd)),safe_date(y,m,int(ed))
+    def settlement_month(txdate,card):
+        if card['period_start_day'] is None or card['period_end_day'] is None: return txdate.strftime('%Y-%m')
+        for off in (-1,0,1,2):
+            yy,mm=shift_month(txdate.year,txdate.month,off); target=f'{yy:04d}-{mm:02d}'
+            x,y=period_for(target,card)
+            if x<=txdate<=y: return target
+        return txdate.strftime('%Y-%m')
+    with db() as conn:
+        cards={int(r['id']):dict(r) for r in conn.execute("SELECT id,name,payment_day,period_start_day,period_end_day FROM cards").fetchall()}
+        cats={int(r['id']):dict(r) for r in conn.execute("SELECT id,name FROM categories").fetchall()}
+        rows=conn.execute("SELECT id,tx_date,tx_time,amount,card_id,category_id,content,user_percent,wife_percent,installment_months FROM transactions ORDER BY tx_date DESC, tx_time DESC, id DESC").fetchall()
+    out=[]
+    for r in rows:
+        card=cards.get(int(r['card_id']))
+        if not card: continue
+        purchase=r['tx_date'] if isinstance(r['tx_date'],date) else date.fromisoformat(str(r['tx_date']))
+        first=settlement_month(purchase,card); n=max(1,int(r['installment_months'] or 1))
+        if month < first or month > add_month(first,n-1): continue
+        if kind=='card' and int(item_id)!=int(r['card_id']): continue
+        if kind=='category' and int(item_id)!=(int(r['category_id']) if r['category_id'] is not None else -1): continue
+        allocation=float(r['amount'])/n
+        if kind=='user': value=allocation*int(r['user_percent'])/100
+        elif kind=='wife': value=allocation*int(r['wife_percent'])/100
+        else: value=allocation
+        out.append({'id':r['id'],'date':purchase.isoformat(),'time':r['tx_time'] or '','content':r['content'] or '(내용 없음)','card_name':card['name'],'category_name':cats.get(int(r['category_id']),{}).get('name','미정') if r['category_id'] is not None else '미정','amount':round(float(r['amount'])),'installment_months':n,'allocation':round(value),'user_percent':int(r['user_percent']),'wife_percent':int(r['wife_percent'])})
+    total=sum(x['allocation'] for x in out)
+    json_response(handler,{'month':month,'kind':kind,'total':total,'transactions':out})
+
+
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
         print('[HTTP]', fmt % args)
@@ -606,6 +656,8 @@ class Handler(BaseHTTPRequestHandler):
                 api_settings(self, path.split('/')[3])
             elif path == '/api/settlement':
                 api_settlement(self)
+            elif path == '/api/settlement/details':
+                api_settlement_details(self)
             elif path in ('/', '/index.html'):
                 text_response(self, (APP_DIR / 'static' / 'index.html').read_bytes())
             elif path == '/app.js':
