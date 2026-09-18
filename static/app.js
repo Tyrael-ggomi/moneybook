@@ -123,14 +123,44 @@ async function loadSettings(){
   }catch(e){msg(e.message)}
 }
 function bindSettingDrag(){
-  document.querySelectorAll('#settingsView .settingsItem[data-setting-kind]').forEach(el=>{
-    const handle=el.querySelector('.dragHandle'); if(!handle)return;
-    let dragging=false,pointerId=null;
-    const cleanup=()=>{document.querySelectorAll('.settingsItem.dragging,.settingsItem.dragOver').forEach(x=>x.classList.remove('dragging','dragOver'));if(pointerId!==null){try{handle.releasePointerCapture(pointerId)}catch(_){}}dragging=false;pointerId=null;document.body.style.userSelect='';};
-    handle.onpointerdown=e=>{e.preventDefault();dragging=true;pointerId=e.pointerId;el.classList.add('dragging');handle.setPointerCapture(pointerId);document.body.style.userSelect='none';};
-    handle.onpointermove=e=>{if(!dragging)return;e.preventDefault();const under=document.elementFromPoint(e.clientX,e.clientY)?.closest('.settingsItem[data-setting-kind]');if(!under||under.parentElement!==el.parentElement||under===el)return;document.querySelectorAll('.settingsItem.dragOver').forEach(x=>x.classList.remove('dragOver'));under.classList.add('dragOver');const r=under.getBoundingClientRect();if(e.clientY<r.top+r.height/2)under.parentElement.insertBefore(el,under);else under.parentElement.insertBefore(el,under.nextSibling);};
-    handle.onpointerup=async e=>{if(!dragging)return;e.preventDefault();const list=el.parentElement,kind=el.dataset.settingKind,ids=[...list.querySelectorAll('.settingsItem[data-setting-kind]')].map(x=>Number(x.dataset.id));cleanup();try{await apiSettings('order',null,'POST',{kind,ids});await loadSettings();await refreshAfterSettings()}catch(err){msg(err.message);await loadSettings()}};
-    handle.onpointercancel=cleanup;
+  let dragState=null;
+  const finishDrag=async(cancel=false)=>{
+    if(!dragState)return;
+    const st=dragState; dragState=null;
+    document.removeEventListener('pointermove',onMove);
+    document.removeEventListener('pointerup',onUp);
+    document.removeEventListener('pointercancel',onCancel);
+    st.el.classList.remove('dragging');
+    document.querySelectorAll('.settingsItem.dragOver').forEach(x=>x.classList.remove('dragOver'));
+    document.body.style.userSelect='';
+    if(cancel)return;
+    const list=st.el.parentElement,kind=st.el.dataset.settingKind;
+    const ids=[...list.querySelectorAll('.settingsItem[data-setting-kind]')].map(x=>Number(x.dataset.id));
+    try{await apiSettings('order',null,'POST',{kind,ids});await loadSettings();await refreshAfterSettings()}
+    catch(err){msg(err.message);await loadSettings()}
+  };
+  const onMove=e=>{
+    if(!dragState||e.pointerId!==dragState.pointerId)return;
+    e.preventDefault();
+    const under=document.elementFromPoint(e.clientX,e.clientY)?.closest('.settingsItem[data-setting-kind]');
+    if(!under||under.parentElement!==dragState.el.parentElement||under===dragState.el)return;
+    document.querySelectorAll('.settingsItem.dragOver').forEach(x=>x.classList.remove('dragOver'));
+    under.classList.add('dragOver');
+    const r=under.getBoundingClientRect();
+    if(e.clientY<r.top+r.height/2)under.parentElement.insertBefore(dragState.el,under);
+    else under.parentElement.insertBefore(dragState.el,under.nextSibling);
+  };
+  const onUp=e=>{if(dragState&&e.pointerId===dragState.pointerId)finishDrag(false)};
+  const onCancel=e=>{if(dragState&&e.pointerId===dragState.pointerId)finishDrag(true)};
+  document.querySelectorAll('#settingsView .dragHandle').forEach(handle=>{
+    handle.onpointerdown=e=>{
+      e.preventDefault();e.stopPropagation();
+      const el=handle.closest('.settingsItem');if(!el)return;
+      dragState={el,pointerId:e.pointerId};el.classList.add('dragging');document.body.style.userSelect='none';
+      document.addEventListener('pointermove',onMove,{passive:false});
+      document.addEventListener('pointerup',onUp,{passive:false});
+      document.addEventListener('pointercancel',onCancel,{passive:false});
+    };
   });
 }
 async function moveSetting(kind,id,direction){
