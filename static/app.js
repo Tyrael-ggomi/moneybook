@@ -10,7 +10,7 @@ function fmt(id){let e=$(id),r=e.value.replace(/[^0-9-]/g,'');if(r&&r!=='-'){let
 function query(){let p=new URLSearchParams({limit:100}),s=$('search').value.trim();if(s)p.set('search',s);if($('dateFrom').value)p.set('date_from',$('dateFrom').value);if($('dateTo').value)p.set('date_to',$('dateTo').value);if($('filterCard').value)p.set('card_id',$('filterCard').value);if($('filterCategory').value)p.set('category_id',$('filterCategory').value);return p}
 async function list(){let r=await fetch('/api/transactions?'+query());let d=await r.json();if(!r.ok)throw Error(d.error);lastTransactions=d.transactions;render(d)}
 let selectedTx=new Set();
-function updateBulkUI(){const n=selectedTx.size;$('bulkSelectedCount').textContent=`${n}건 선택`;$('bulkToolbar').classList.toggle('hidden',!n);$('selectAllTransactions').checked=!!lastTransactions.length&&lastTransactions.every(t=>selectedTx.has(t.id));}
+function updateBulkUI(){const n=selectedTx.size;$('bulkSelectedCount').textContent=`${n}건 선택`;$('bulkToolbar').classList.remove('hidden');$('bulkActions').classList.toggle('hidden',!n);$('selectAllTransactions').checked=!!lastTransactions.length&&lastTransactions.every(t=>selectedTx.has(t.id));}
 function render(d){const visible=new Set(d.transactions.map(t=>t.id));selectedTx.forEach(id=>{if(!visible.has(id))selectedTx.delete(id)});$('count').textContent=`총 ${d.total}건`;if(!d.transactions.length){$('list').innerHTML='<div class="empty">조건에 맞는 지출 내역이 없습니다.</div>';updateBulkUI();return} $('list').innerHTML=d.transactions.map(t=>`<div class="transactionItem ${selectedTx.has(t.id)?'selected':''}"><label class="txCheckWrap"><input class="txCheck" type="checkbox" data-id="${t.id}" ${selectedTx.has(t.id)?'checked':''}></label><button class="item itemBtn" data-id="${t.id}" type="button"><div class="row"><div class="itemMain"><div class="date">${t.tx_date}${t.tx_time?` · ${esc(t.tx_time)}`:''}</div><div class="content">${esc(t.content||'(내용 없음)')}</div><div class="meta">${esc(t.card_name)} · ${esc(t.category_name)} · ${t.user_percent}:${t.wife_percent}${t.installment_months>1?' · '+t.installment_months+'개월':' · 일시불'}</div></div><div class="amount ${t.amount<0?'negative':''}">${money(t.amount)}</div></div></button></div>`).join('');document.querySelectorAll('.itemBtn').forEach(x=>x.onclick=()=>openEdit(+x.dataset.id));document.querySelectorAll('.txCheck').forEach(x=>x.onchange=()=>{const id=Number(x.dataset.id);x.checked?selectedTx.add(id):selectedTx.delete(id);render({transactions:lastTransactions,total:lastTransactions.length})});updateBulkUI()}
 async function bulkCategory(){if(!selectedTx.size)return;$('bulkCategorySelect').innerHTML=boot.categories.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('');$('bulkCategoryModal').classList.remove('hidden')}
 async function bulkCategorySave(){try{const r=await fetch('/api/transactions/bulk_update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:[...selectedTx],category_id:$('bulkCategorySelect').value})}),d=await r.json();if(!r.ok||!d.ok)throw Error(d.error);selectedTx.clear();$('bulkCategoryModal').classList.add('hidden');msg(`${d.count}건의 카테고리를 변경했습니다.`,true);await list()}catch(e){msg(e.message)}}
@@ -136,8 +136,17 @@ function bindSettingDrag(){
     if(cancel)return;
     const list=st.el.parentElement,kind=st.el.dataset.settingKind;
     const ids=[...list.querySelectorAll('.settingsItem[data-setting-kind]')].map(x=>Number(x.dataset.id));
-    try{await apiSettings('order',null,'POST',{kind,ids});await loadSettings();await refreshAfterSettings()}
-    catch(err){msg(err.message);await loadSettings()}
+    const previous=st.previousIds;
+    try{
+      await apiSettings('order',null,'POST',{kind,ids});
+      const reorder=(arr)=>ids.map(id=>arr.find(x=>Number(x.id)===id)).filter(Boolean);
+      if(kind==='cards'){cardsCache=reorder(cardsCache);if(boot)boot.cards=reorder(boot.cards)}
+      if(kind==='categories'){catsCache=reorder(catsCache);if(boot)boot.categories=reorder(boot.categories)}
+      if(kind==='rules'){rulesCache=reorder(rulesCache);if(boot)boot.rules=reorder(boot.rules)}
+    }catch(err){
+      msg(err.message);
+      [...list.querySelectorAll('.settingsItem[data-setting-kind]')].sort((a,b)=>previous.indexOf(Number(a.dataset.id))-previous.indexOf(Number(b.dataset.id))).forEach(x=>list.appendChild(x));
+    }
   };
   const onMove=e=>{
     if(!dragState||e.pointerId!==dragState.pointerId)return;
@@ -156,7 +165,8 @@ function bindSettingDrag(){
     handle.onpointerdown=e=>{
       e.preventDefault();e.stopPropagation();
       const el=handle.closest('.settingsItem');if(!el)return;
-      dragState={el,pointerId:e.pointerId};el.classList.add('dragging');document.body.style.userSelect='none';
+      dragState={el,pointerId:e.pointerId,previousIds:[...el.parentElement.querySelectorAll('.settingsItem[data-setting-kind]')].map(x=>Number(x.dataset.id))};
+      el.classList.add('dragging');document.body.style.userSelect='none';
       document.addEventListener('pointermove',onMove,{passive:false});
       document.addEventListener('pointerup',onUp,{passive:false});
       document.addEventListener('pointercancel',onCancel,{passive:false});
