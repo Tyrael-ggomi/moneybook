@@ -233,7 +233,8 @@ def api_transactions(handler):
              "FROM transactions t LEFT JOIN cards c ON c.id=t.card_id LEFT JOIN categories g ON g.id=t.category_id "
              +clause+" ORDER BY t.tx_date DESC, CASE WHEN t.tx_time=\'\' THEN 1 ELSE 0 END ASC, t.tx_time DESC,t.id DESC LIMIT ?")
         rows=conn.execute(sql,(*args,limit)).fetchall()
-        total=conn.execute("SELECT COUNT(*) FROM transactions t LEFT JOIN cards c ON c.id=t.card_id LEFT JOIN categories g ON g.id=t.category_id"+clause,args).fetchone()[0]
+        count_row=conn.execute("SELECT COUNT(*) AS n FROM transactions t LEFT JOIN cards c ON c.id=t.card_id LEFT JOIN categories g ON g.id=t.category_id"+clause,args).fetchone()
+        total=count_row['n'] if USING_POSTGRES else count_row[0]
     json_response(handler, {'transactions':[dict(r) for r in rows], 'total':total})
 
 def validate_transaction_payload(conn, data):
@@ -543,7 +544,7 @@ def api_settlement(handler):
     for r in rows:
         card=card_map.get(int(r['card_id']))
         if not card: continue
-        purchase=date.fromisoformat(r['tx_date'])
+        purchase=r['tx_date'] if isinstance(r['tx_date'], date) else date.fromisoformat(str(r['tx_date']))
         first=settlement_month(purchase,card)
         n=max(1,int(r['installment_months'] or 1)); per=float(r['amount'])/n
         for i in range(n):
