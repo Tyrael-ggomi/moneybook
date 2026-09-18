@@ -38,19 +38,30 @@ async function loadSettlement(){
   $('settlementTitle').textContent='3개월 결산';
   $('settlementMonths').innerHTML=settlementGridHtml(data);
 }
+function openSettlementDetails(kind,id,month){
+  const modal=$('settlementDetailModal');
+  $('settlementDetailTitle').textContent=kind==='card'?'카드별 내역':kind==='category'?'카테고리별 내역':kind==='user'?boot.settings.user_name+' 지출 내역':kind==='wife'?boot.settings.wife_name+' 지출 내역':'총 지출 내역';
+  $('settlementDetailSub').textContent=month.slice(0,4)+'년 '+Number(month.slice(5))+'월 결산 반영 내역';
+  $('settlementDetailList').innerHTML='<div class="empty">불러오는 중…</div>';
+  modal.classList.remove('hidden');
+  fetch('/api/settlement/details?month='+encodeURIComponent(month)+'&kind='+encodeURIComponent(kind)+(id!==''?'&id='+encodeURIComponent(id):''))
+    .then(r=>r.json().then(d=>({r,d}))).then(({r,d})=>{if(!r.ok)throw Error(d.error);$('settlementDetailTotal').textContent=money(d.total);$('settlementDetailList').innerHTML=d.transactions.length?d.transactions.map(t=>`<button type="button" class="settleDetailItem" data-tx-id="${t.id}"><div class="settleDetailTop"><span>${esc(t.date)}${t.time?' · '+esc(t.time):''}</span><strong>${money(t.allocation)}</strong></div><div class="settleDetailContent">${esc(t.content)}</div><div class="settleDetailMeta">${esc(t.card_name)} · ${esc(t.category_name)} · ${t.user_percent}:${t.wife_percent}${t.installment_months>1?' · '+t.installment_months+'개월 할부':' · 일시불'}${t.installment_months>1?' · 원금 '+money(t.amount):''}</div></button>`).join(''):'<div class="empty">해당 월에 반영된 내역이 없습니다.</div>';document.querySelectorAll('[data-tx-id]').forEach(b=>b.onclick=()=>{closeSettlementDetails();setView('expenseView');openEdit(Number(b.dataset.txId))})})
+    .catch(e=>{$('settlementDetailList').innerHTML='<div class="empty">'+esc(e.message)+'</div>'});
+}
+function closeSettlementDetails(){$('settlementDetailModal').classList.add('hidden')}
 function settlementGridHtml(data){
   const ms=data.months;
   const colHead=ms.map(m=>`<div class="settleCell monthHead">${Number(m.month.slice(5))}월</div>`).join('');
-  const row=(label, values, cls='')=>`<div class="settleRow"><div class="settleLabel ${cls}">${label}</div>${values.map(v=>`<div class="settleCell ${Number(v)<0?'negative':''}">${money2(v)}</div>`).join('')}</div>`;
+  const row=(label, values, cls='', kind='total', itemId=null)=>`<div class="settleRow"><div class="settleLabel ${cls}">${label}</div>${values.map((v,i)=>`<button type="button" class="settleCell settleLink ${Number(v)<0?'negative':''}" data-settle-kind="${kind}" data-settle-id="${itemId??''}" data-settle-month="${ms[i].month}">${money2(v)}</button>`).join('')}</div>`;
   const cardNames=[...new Map(ms.flatMap(m=>m.cards.map(c=>[c.id,c.name]))).entries()];
   const catNames=[...new Map(ms.flatMap(m=>m.categories.map(c=>[c.id,c.name]))).entries()];
-  const cardRows=cardNames.map(([id,name])=>row(esc(name),ms.map(m=>m.cards.find(c=>c.id==id)?.amount||0))).join('');
-  const catRows=catNames.map(([id,name])=>row(esc(name),ms.map(m=>m.categories.find(c=>c.id==id)?.amount||0))).join('');
+  const cardRows=cardNames.map(([id,name])=>row(esc(name),ms.map(m=>m.cards.find(c=>c.id==id)?.amount||0),'','card',id)).join('');
+  const catRows=catNames.map(([id,name])=>row(esc(name),ms.map(m=>m.categories.find(c=>c.id==id)?.amount||0),'','category',id)).join('');
   return `<div class="settleGrid">
     <div class="settleRow settleHeader"><div class="settleLabel">항목</div>${colHead}</div>
     ${row('총 지출',ms.map(m=>m.total),'strongRow')}
-    ${row(esc(data.user_name),ms.map(m=>m.user))}
-    ${row(esc(data.wife_name),ms.map(m=>m.wife))}
+    ${row(esc(data.user_name),ms.map(m=>m.user),'','user')}
+    ${row(esc(data.wife_name),ms.map(m=>m.wife),'','wife')}
     <div class="sectionRow"><div>💳 카드별</div></div>
     ${cardRows || '<div class="empty">내역 없음</div>'}
     <div class="sectionRow"><div>🏷️ 카테고리별</div></div>
@@ -349,3 +360,6 @@ function openImport(){$('importCard').innerHTML=boot.cards.map(x=>`<option value
 function closeImport(){$('importModal').classList.add('hidden');importRows=[]}
 $('openImportBtn').onclick=openImport;$('closeImportModal').onclick=closeImport;$('importModal').onclick=e=>{if(e.target.id==='importModal')closeImport()};$('importRatio').oninput=importRatioUpdate;$('importCard').onchange=()=>{if(importRows.length)refreshImportPreview()};$('importPreviewBtn').onclick=async()=>{const parsed=await refreshImportPreview();if(parsed.errors.length)$('importMessage').textContent='오류를 먼저 수정한 뒤 다시 미리보기 해주세요.';else if(importDuplicateFlags.some(x=>x.exact||x.similar)){$('importMessage').textContent='🟠 중복 의심 내역이 있습니다. 확인 후 등록하세요.';$('importMessage').className='message';}else $('importMessage').textContent=''};
 $('importSaveBtn').onclick=async()=>{if(!importRows.length)return;const ratioVal=Math.max(0,Math.min(100,Number($('importRatio').value)||0));const minjeong=boot.categories.find(x=>x.name==='미정');if(!minjeong){$('importMessage').textContent='미정 카테고리가 없습니다. 페이지를 새로고침해 주세요.';$('importMessage').className='message err';return}const rules=boot.rules||[];const rows=importRows.map(x=>{const hit=rules.filter(r=>String(x.content).toUpperCase().includes(String(r.keyword).toUpperCase()))[0];return {date:x.date,time:x.time,amount:x.amount,card_id:$('importCard').value,category_id:hit?hit.category_id:minjeong.id,content:x.content,user_percent:ratioVal,installment_months:x.installment_months||1}});const btn=$('importSaveBtn');btn.disabled=true;$('importMessage').textContent='등록 중…';$('importMessage').className='message';try{const r=await fetch('/api/transactions/import',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({rows})});const d=await r.json();if(!r.ok||!d.ok)throw Error(d.error);closeImport();msg(`${d.count}건을 등록했습니다.`,true);await list()}catch(e){$('importMessage').textContent=e.message;$('importMessage').className='message err';btn.disabled=false}}
+
+
+document.addEventListener('click',e=>{const b=e.target.closest('.settleLink');if(!b)return;openSettlementDetails(b.dataset.settleKind,b.dataset.settleId,b.dataset.settleMonth)});
