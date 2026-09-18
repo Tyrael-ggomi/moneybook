@@ -49,3 +49,7 @@ html,body{overflow-x:hidden}
   .dateTimeGrid{gap:8px}
   .dateTimeGrid input,.filterDateGrid input{font-size:15px;padding-left:9px;padding-right:9px}
 }
+
+
+/* Settlement drill-down */
+.settleLink{border:0;border-radius:0;background:transparent;cursor:pointer;font-weight:700;color:inherit;height:auto;min-height:40px}.settleLink:active{background:#f3f4f6}.settlementDetailSummary{padding:11px 12px;border:1px solid #e5e7eb;border-radius:12px;background:#f9fafb;margin-bottom:10px;font-size:13px;display:flex;justify-content:space-between}.settlementDetailSummary strong{font-size:15px}.settlementDetailList{border:1px solid #e5e7eb;border-radius:12px;overflow:hidden}.settleDetailItem{display:block;width:100%;height:auto;text-align:left;border:0;border-bottom:1px solid #eee;border-radius:0;padding:11px 12px;background:#fff;font-weight:400}.settleDetailItem:last-child{border-bottom:0}.settleDetailItem:active{background:#f3f4f6}.settleDetailTop{display:flex;justify-content:space-between;gap:10px;font-size:11px;color:#6b7280}.settleDetailTop strong{font-size:14px;color:#111827;white-space:nowrap}.settleDetailContent{font-size:14px;font-weight:800;margin-top:4px;word-break:break-word}.settleDetailMeta{font-size:11px;color:#6b7280;margin-top:4px;line-height:1.4}.settlementDetailBox{max-height:88vh}
