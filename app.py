@@ -447,11 +447,13 @@ def api_settings(handler, kind=None, item_id=None):
                         if pd is not None and not 1<=pd<=31: raise ValueError('결제일은 1~31일입니다.')
                         if sd is not None and not 1<=sd<=31: raise ValueError('이용기간 시작일은 1~31일입니다.')
                         if ed is not None and not 1<=ed<=31: raise ValueError('이용기간 종료일은 1~31일입니다.')
-                        cur = conn.execute(f"INSERT INTO {table}(name,active,sort_order,payment_day,period_start_day,period_end_day) VALUES(?,1,?,?,?,?)", (name,max_order+1,pd,sd,ed))
+                        cur = conn.execute(f"INSERT INTO {table}(name,active,sort_order,payment_day,period_start_day,period_end_day) VALUES(?,1,?,?,?,?) RETURNING id" if USING_POSTGRES else f"INSERT INTO {table}(name,active,sort_order,payment_day,period_start_day,period_end_day) VALUES(?,1,?,?,?,?)", (name,max_order+1,pd,sd,ed))
+                        new_row = cur.fetchone() if USING_POSTGRES else None
                     else:
-                        cur = conn.execute(f"INSERT INTO {table}(name,active,sort_order) VALUES(?,1,?)", (name,max_order+1))
+                        cur = conn.execute(f"INSERT INTO {table}(name,active,sort_order) VALUES(?,1,?) RETURNING id" if USING_POSTGRES else f"INSERT INTO {table}(name,active,sort_order) VALUES(?,1,?)", (name,max_order+1))
+                        new_row = cur.fetchone() if USING_POSTGRES else None
                 except INTEGRITY_ERROR: raise ValueError('이미 같은 이름이 있습니다.')
-                conn.commit(); json_response(handler, {'ok':True,'id':cur.lastrowid}); return
+                conn.commit(); json_response(handler, {'ok':True,'id':new_row['id'] if USING_POSTGRES else cur.lastrowid}); return
             if method == 'POST' and item_id is not None:
                 try:
                     if kind=='cards':
