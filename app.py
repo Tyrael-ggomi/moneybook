@@ -171,7 +171,8 @@ def ensure_schema():
         if minjeong:
             conn.execute("UPDATE categories SET active=1 WHERE id=?", (minjeong['id'],))
         else:
-            max_order = conn.execute("SELECT COALESCE(MAX(sort_order),-1) FROM categories").fetchone()[0]
+            max_order_row = conn.execute("SELECT COALESCE(MAX(sort_order),-1) AS max_order FROM categories").fetchone()
+            max_order = max_order_row['max_order'] if USING_POSTGRES else max_order_row[0]
             conn.execute("INSERT INTO categories(name,active,sort_order) VALUES('미정',1,?)", (max_order+1,))
         conn.commit()
 
@@ -440,7 +441,8 @@ def api_settings(handler, kind=None, item_id=None):
             if not name: raise ValueError('이름을 입력하세요.')
             if method == 'POST' and item_id is None:
                 try:
-                    max_order = conn.execute(f"SELECT COALESCE(MAX(sort_order),-1) FROM {table}").fetchone()[0]
+                    max_order_row = conn.execute(f"SELECT COALESCE(MAX(sort_order),-1) AS max_order FROM {table}").fetchone()
+                    max_order = max_order_row['max_order'] if USING_POSTGRES else max_order_row[0]
                     if kind=='cards':
                         pd=data.get('payment_day'); sd=data.get('period_start_day'); ed=data.get('period_end_day')
                         pd=int(pd) if pd not in (None,'') else None; sd=int(sd) if sd not in (None,'') else None; ed=int(ed) if ed not in (None,'') else None
