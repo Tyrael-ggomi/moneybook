@@ -21,3 +21,23 @@ body{padding-bottom:calc(76px + env(safe-area-inset-bottom))}
 input[type=date],input[type=time]{min-width:0;max-width:100%;width:100%;box-sizing:border-box}
 
 .list .date,.list .content,.list .meta{color:#111827}.transactionItem{display:flex;align-items:stretch;border-bottom:1px solid #e5e7eb}.transactionItem.selected{background:#f3f4f6}.txCheckWrap{width:42px;display:flex;align-items:center;justify-content:center}.txCheck{width:20px;height:20px}.transactionItem .itemBtn{flex:1;border:0;border-radius:0}.bulkBar{position:sticky;top:0;z-index:5;background:#fff;border:1px solid #d1d5db;border-radius:12px;padding:10px;margin:8px 0;display:flex;gap:10px;align-items:center;flex-wrap:wrap}.bulkBar.hidden{display:none}.bulkActions{display:flex;gap:6px;flex-wrap:wrap}.bulkCount{font-weight:700}.dragHandle{display:flex;align-items:center;justify-content:center;width:38px;min-width:38px;font-size:20px;color:#6b7280;cursor:grab;touch-action:none;user-select:none}.settingsItem.dragging{opacity:.45}.settingsItem.dragOver{outline:2px dashed #9ca3af;outline-offset:-2px}@media(max-width:420px){.bulkActions{width:100%}.bulkActions button{flex:1}.dateTimeGrid,.filterDateGrid{grid-template-columns:1fr 1fr}}
+
+
+/* v0.7.1 — mobile expense/filter layout + compact bulk selection */
+html,body{overflow-x:hidden}
+.dateTimeGrid,.filterDateGrid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important}
+.dateTimeGrid>label,.filterDateGrid>input{min-width:0}
+.dateTimeGrid input,.filterDateGrid input{min-width:0!important;width:100%;max-width:100%}
+.filterDateGrid{gap:8px}
+.bulkBar{position:sticky;top:0;z-index:5;min-height:46px;padding:7px 9px;border-radius:13px;gap:8px;margin:8px 0}
+.bulkSelectAll{display:flex;align-items:center;gap:7px;margin:0;min-height:30px;font-size:13px;font-weight:800;white-space:nowrap}
+.bulkSelectAll input{width:18px!important;height:18px!important;min-width:18px!important;margin:0;padding:0;accent-color:#111827}
+.bulkCount{font-size:12px;color:#6b7280;margin-left:auto}
+.bulkActions{display:flex;gap:6px;flex-wrap:wrap;width:100%}
+.bulkActions.hidden{display:none}
+.bulkActions button{height:38px;font-size:12px;padding:0 10px}
+@media(max-width:420px){
+  .dateTimeGrid,.filterDateGrid{grid-template-columns:minmax(0,1fr) minmax(0,1fr)!important}
+  .dateTimeGrid{gap:8px}
+  .dateTimeGrid input,.filterDateGrid input{font-size:15px;padding-left:9px;padding-right:9px}
+}
