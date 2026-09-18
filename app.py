@@ -477,9 +477,10 @@ def api_settings(handler, kind=None, item_id=None):
             if not conn.execute("SELECT id FROM categories WHERE id=? AND active=1",(category_id,)).fetchone(): raise ValueError('사용할 수 없는 카테고리입니다.')
             if method == 'POST' and item_id is None:
                 try:
-                    cur=conn.execute("INSERT INTO auto_rules(keyword,category_id,active) VALUES(?,?,1)",(keyword,category_id))
+                    cur=conn.execute("INSERT INTO auto_rules(keyword,category_id,active) VALUES(?,?,1) RETURNING id" if USING_POSTGRES else "INSERT INTO auto_rules(keyword,category_id,active) VALUES(?,?,1)",(keyword,category_id))
+                    new_row=cur.fetchone() if USING_POSTGRES else None
                 except INTEGRITY_ERROR: raise ValueError('이미 같은 키워드가 있습니다.')
-                conn.commit(); json_response(handler, {'ok':True,'id':cur.lastrowid}); return
+                conn.commit(); json_response(handler, {'ok':True,'id':new_row['id'] if USING_POSTGRES else cur.lastrowid}); return
             if method == 'POST' and item_id is not None:
                 try:
                     cur=conn.execute("UPDATE auto_rules SET keyword=?,category_id=?,active=? WHERE id=?",(keyword,category_id,1 if data.get('active',True) else 0,item_id))
