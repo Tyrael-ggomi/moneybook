@@ -46,7 +46,11 @@ class DBConn:
         return self.raw.execute(self._sql(sql), params)
 
     def executemany(self, sql, params):
-        return self.raw.executemany(self._sql(sql), params)
+        sql = self._sql(sql)
+        if self.postgres:
+            with self.raw.cursor() as cur:
+                return cur.executemany(sql, params)
+        return self.raw.executemany(sql, params)
 
     def commit(self):
         return self.raw.commit()
