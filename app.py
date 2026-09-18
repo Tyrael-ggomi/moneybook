@@ -309,6 +309,38 @@ def api_import_transactions(handler):
     json_response(handler,{'ok':True,'count':len(prepared)})
 
 
+def api_bulk_update_transactions(handler):
+    data=parse_body(handler)
+    ids=data.get('ids')
+    category_id=data.get('category_id')
+    if not isinstance(ids,list) or not ids or len(ids)>500:
+        raise ValueError('선택한 지출 내역이 올바르지 않습니다.')
+    try: ids=[int(x) for x in ids]
+    except Exception: raise ValueError('선택한 지출 내역이 올바르지 않습니다.')
+    if len(set(ids))!=len(ids): raise ValueError('중복된 지출 내역이 있습니다.')
+    if category_id in (None,'',0,'0'): raise ValueError('카테고리를 선택하세요.')
+    category_id=int(category_id)
+    with db() as conn:
+        if not conn.execute("SELECT id FROM categories WHERE id=? AND active=1",(category_id,)).fetchone(): raise ValueError('사용할 수 없는 카테고리입니다.')
+        placeholders=','.join('?' for _ in ids)
+        cur=conn.execute(f"UPDATE transactions SET category_id=? WHERE id IN ({placeholders})",(category_id,*ids))
+        conn.commit()
+    json_response(handler,{'ok':True,'count':cur.rowcount})
+
+
+def api_bulk_delete_transactions(handler):
+    data=parse_body(handler)
+    ids=data.get('ids')
+    if not isinstance(ids,list) or not ids or len(ids)>500: raise ValueError('선택한 지출 내역이 올바르지 않습니다.')
+    try: ids=[int(x) for x in ids]
+    except Exception: raise ValueError('선택한 지출 내역이 올바르지 않습니다.')
+    if len(set(ids))!=len(ids): raise ValueError('중복된 지출 내역이 있습니다.')
+    placeholders=','.join('?' for _ in ids)
+    with db() as conn:
+        cur=conn.execute(f"DELETE FROM transactions WHERE id IN ({placeholders})",tuple(ids))
+        conn.commit()
+    json_response(handler,{'ok':True,'count':cur.rowcount})
+
 def api_notes(handler, note_id=None):
     method = handler.command
     if method == 'GET':
@@ -438,9 +470,9 @@ def api_settings_order(handler):
     data=parse_body(handler)
     kind=str(data.get('kind') or '')
     ids=data.get('ids')
-    if kind not in ('cards','categories') or not isinstance(ids,list) or not ids:
+    if kind not in ('cards','categories','rules') or not isinstance(ids,list) or not ids:
         raise ValueError('순서 정보가 올바르지 않습니다.')
-    table=kind
+    table={'cards':'cards','categories':'categories','rules':'auto_rules'}[kind]
     ids=[int(x) for x in ids]
     with db() as conn:
         rows=conn.execute(f"SELECT id FROM {table}").fetchall()
@@ -584,6 +616,10 @@ class Handler(BaseHTTPRequestHandler):
                 api_settings(self, 'names')
             elif path == '/api/settings/order':
                 api_settings_order(self)
+            elif path == '/api/transactions/bulk_update':
+                api_bulk_update_transactions(self)
+            elif path == '/api/transactions/bulk_delete':
+                api_bulk_delete_transactions(self)
             elif re.fullmatch(r'/api/transactions/\d+', path):
                 api_update_transaction(self, int(path.rsplit('/', 1)[1]))
             else:
