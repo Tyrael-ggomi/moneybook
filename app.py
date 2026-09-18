@@ -68,8 +68,14 @@ def db():
     return DBConn(conn, postgres=False)
 
 
+def _json_default(value):
+    if isinstance(value, (date, datetime)):
+        return value.isoformat()
+    return str(value)
+
+
 def json_response(handler, payload, status=HTTPStatus.OK):
-    raw = json.dumps(payload, ensure_ascii=False).encode('utf-8')
+    raw = json.dumps(payload, ensure_ascii=False, default=_json_default).encode('utf-8')
     handler.send_response(status)
     handler.send_header('Content-Type', 'application/json; charset=utf-8')
     handler.send_header('Content-Length', str(len(raw)))
