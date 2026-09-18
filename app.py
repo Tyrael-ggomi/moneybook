@@ -274,9 +274,14 @@ def api_add_transaction(handler):
     data=parse_body(handler)
     with db() as conn:
         values=validate_transaction_payload(conn,data)
-        cur=conn.execute("INSERT INTO transactions (tx_date,tx_time,amount,card_id,category_id,content,user_percent,wife_percent,installment_months) VALUES (?,?,?,?,?,?,?,?,?)",values)
+        if USING_POSTGRES:
+            row=conn.execute("INSERT INTO transactions (tx_date,tx_time,amount,card_id,category_id,content,user_percent,wife_percent,installment_months) VALUES (?,?,?,?,?,?,?,?,?) RETURNING id",values).fetchone()
+            tx_id=row['id']
+        else:
+            cur=conn.execute("INSERT INTO transactions (tx_date,tx_time,amount,card_id,category_id,content,user_percent,wife_percent,installment_months) VALUES (?,?,?,?,?,?,?,?,?)",values)
+            tx_id=cur.lastrowid
         conn.commit()
-    json_response(handler,{"ok":True,"id":cur.lastrowid})
+    json_response(handler,{"ok":True,"id":tx_id})
 
 def api_check_duplicates(handler):
     data=parse_body(handler)
@@ -361,8 +366,13 @@ def api_notes(handler, note_id=None):
         raise ValueError('메모 내용을 입력하세요.')
     with db() as conn:
         if method == 'POST' and note_id is None:
-            cur=conn.execute("INSERT INTO notes(content,done) VALUES(?,0)",(content,))
-            conn.commit(); json_response(handler,{'ok':True,'id':cur.lastrowid}); return
+            if USING_POSTGRES:
+                row=conn.execute("INSERT INTO notes(content,done) VALUES(?,0) RETURNING id",(content,)).fetchone()
+                note_id=row['id']
+            else:
+                cur=conn.execute("INSERT INTO notes(content,done) VALUES(?,0)",(content,))
+                note_id=cur.lastrowid
+            conn.commit(); json_response(handler,{'ok':True,'id':note_id}); return
         if method == 'POST' and note_id is not None:
             done=1 if data.get('done') else 0
             cur=conn.execute("UPDATE notes SET content=?,done=?,updated_at=CURRENT_TIMESTAMP WHERE id=?",(content,done,note_id))
