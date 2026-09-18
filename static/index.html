@@ -6,7 +6,7 @@
 <meta name="theme-color" content="#111827">
 <link rel="manifest" href="/manifest.webmanifest">
 <title>머니북 모바일 v0.7.0</title>
-<link rel="stylesheet" href="/style.css?v=0.6.4">
+<link rel="stylesheet" href="/style.css?v=0.7.0">
 </head>
 <body>
 <nav class="topNav">
@@ -20,7 +20,7 @@
 <section class="card expenseView">
   <h1>지출 입력</h1>
   <form id="expenseForm">
-    <div class="grid2"><label>날짜<input id="date" type="date" required></label><label>시간<input id="time" type="time"></label></div>
+    <div class="grid2 dateTimeGrid"><label>날짜<input id="date" type="date" required></label><label>시간<input id="time" type="time"></label></div>
     <label>금액<input id="amount" inputmode="numeric" autocomplete="off" placeholder="예: 12,300" required></label>
     <div class="grid2">
       <label>카드<select id="card" required></select></label>
@@ -34,9 +34,9 @@
   </form>
 </section>
 <section class="card expenseView">
-  <div class="listHead"><h2>지출내역</h2><span id="count"></span></div><div class="filters"><input id="search" type="search" placeholder="내용·카드·카테고리 검색"><div class="grid2"><input id="dateFrom" type="date"><input id="dateTo" type="date"></div><div class="grid2"><select id="filterCard"><option value="">전체 카드</option></select><select id="filterCategory"><option value="">전체 카테고리</option></select></div><button type="button" id="filterReset">필터 초기화</button><button type="button" id="openImportBtn" class="importBtn">📋 엑셀·Sheets 붙여넣기</button></div>
+  <div class="listHead"><h2>지출내역</h2><span id="count"></span></div><div class="filters"><input id="search" type="search" placeholder="내용·카드·카테고리 검색"><div class="grid2 filterDateGrid"><input id="dateFrom" type="date"><input id="dateTo" type="date"></div><div class="grid2"><select id="filterCard"><option value="">전체 카드</option></select><select id="filterCategory"><option value="">전체 카테고리</option></select></div><button type="button" id="filterReset">필터 초기화</button><button type="button" id="openImportBtn" class="importBtn">📋 엑셀·Sheets 붙여넣기</button></div>
   <div id="bulkToolbar" class="bulkBar hidden"><label class="bulkSelectAll"><input id="selectAllTransactions" type="checkbox"><span>현재 목록 전체 선택</span></label><span id="bulkSelectedCount" class="bulkCount">0건 선택</span><div class="bulkActions"><button id="bulkCategoryBtn" type="button">카테고리 변경</button><button id="bulkDeleteBtn" type="button" class="danger">삭제</button><button id="bulkClearBtn" type="button">선택 해제</button></div></div><div id="list" class="list"></div>
-</section><div id="editModal" class="modal hidden"><div class="modalBox"><div class="modalHead"><h2>지출 수정</h2><button type="button" id="closeModal" class="iconBtn">×</button></div><form id="editForm"><div class="grid2"><label>날짜<input id="editDate" type="date" required></label><label>시간<input id="editTime" type="time"></label></div><label>금액<input id="editAmount" inputmode="numeric" required></label><div class="grid2"><label>카드<select id="editCard" required></select></label><label>카테고리<select id="editCategory"><option value="">자동 분류</option></select></label></div><label>내용<input id="editContent" type="text"></label><div class="ratioBox"><div class="ratioHead"><span id="editUserLabel"></span><strong id="editRatioText">50 : 50</strong><span id="editWifeLabel"></span></div><input id="editRatio" type="range" min="0" max="100" value="50"></div><label>할부<select id="editInstallment"></select></label><div class="buttons"><button class="primary" type="submit">수정 저장</button><button type="button" id="deleteBtn">삭제</button></div><p id="editMessage" class="message"></p></form></div></div>
+</section><div id="editModal" class="modal hidden"><div class="modalBox"><div class="modalHead"><h2>지출 수정</h2><button type="button" id="closeModal" class="iconBtn">×</button></div><form id="editForm"><div class="grid2 dateTimeGrid"><label>날짜<input id="editDate" type="date" required></label><label>시간<input id="editTime" type="time"></label></div><label>금액<input id="editAmount" inputmode="numeric" required></label><div class="grid2"><label>카드<select id="editCard" required></select></label><label>카테고리<select id="editCategory"><option value="">자동 분류</option></select></label></div><label>내용<input id="editContent" type="text"></label><div class="ratioBox"><div class="ratioHead"><span id="editUserLabel"></span><strong id="editRatioText">50 : 50</strong><span id="editWifeLabel"></span></div><input id="editRatio" type="range" min="0" max="100" value="50"></div><label>할부<select id="editInstallment"></select></label><div class="buttons"><button class="primary" type="submit">수정 저장</button><button type="button" id="deleteBtn">삭제</button></div><p id="editMessage" class="message"></p></form></div></div>
 
 
 <div id="bulkCategoryModal" class="modal hidden"><div class="modalBox"><div class="modalHead"><div><h2>카테고리 일괄 변경</h2><div class="modalSub">선택한 지출 내역의 카테고리를 한 번에 변경합니다.</div></div><button id="bulkCategoryClose" type="button" class="iconBtn">×</button></div><label>카테고리<select id="bulkCategorySelect"></select></label><div class="buttons"><button id="bulkCategorySave" type="button" class="primary">변경 저장</button><button id="bulkCategoryCancel" type="button">취소</button></div></div></div><div id="importModal" class="modal hidden"><div class="modalBox importModalBox"><div class="modalHead"><div><h2>엑셀·Sheets 붙여넣기</h2><div class="modalSub">날짜 · 시간 · 가맹점 · 금액 순서의 표를 그대로 붙여넣으세요.</div></div><button type="button" id="closeImportModal" class="iconBtn">×</button></div><div class="importStep"><label>① 엑셀/Sheets 내용<textarea id="importText" rows="8" placeholder="날짜\t시간\t가맹점\t금액(원)\n9. 4(금)\t9:19\t자판기털이\t10062"></textarea></label><div class="importHelp">Google Sheets에서 표 전체를 복사한 뒤 여기에 Ctrl+V 하세요.</div></div><div class="grid2"><label>② 카드<select id="importCard"></select></label><div class="importFixedHint"><strong>③ 미분류</strong><br>자동분류되지 않으면 <b>미정</b>으로 등록</div></div><div class="grid2"><label>④ 내 비율<input id="importRatio" type="number" min="0" max="100" value="50" inputmode="numeric"></label><div class="importRatioHint"><span id="importUserName"></span> : <span id="importWifeName"></span> = <strong id="importRatioText">50 : 50</strong></div></div><div id="importPreview" class="importPreview"></div><div class="buttons"><button type="button" id="importPreviewBtn">미리보기</button><button type="button" id="importSaveBtn" class="primary" disabled>등록하기</button></div><p id="importMessage" class="message"></p></div></div>
@@ -68,5 +68,5 @@
   </section>
 </section>
 </main>
-<script src="/app.js?v=0.6.4"></script>
+<script src="/app.js?v=0.7.0"></script>
 </body></html>
