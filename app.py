@@ -221,7 +221,8 @@ def apply_auto_category(conn, content):
 
 def api_transactions(handler):
     q = parse_qs(urlparse(handler.path).query)
-    limit = min(max(int(q.get("limit", ["30"])[0]), 1), 100)
+    limit = min(max(int(q.get("limit", ["100"])[0]), 1), 500)
+    offset = max(int(q.get("offset", ["0"])[0]), 0)
     search = str(q.get("search", [""])[0]).strip()
     date_from = str(q.get("date_from", [""])[0]).strip()
     date_to = str(q.get("date_to", [""])[0]).strip()
@@ -242,11 +243,21 @@ def api_transactions(handler):
         sql=("SELECT t.id,t.tx_date,t.tx_time,t.amount,t.card_id,t.category_id,t.content,t.user_percent,t.wife_percent,t.installment_months,"
              "COALESCE(c.name,'(카드 없음)') card_name,COALESCE(g.name,'미정') category_name "
              "FROM transactions t LEFT JOIN cards c ON c.id=t.card_id LEFT JOIN categories g ON g.id=t.category_id "
-             +clause+" ORDER BY t.tx_date DESC, CASE WHEN t.tx_time=\'\' THEN 1 ELSE 0 END ASC, t.tx_time DESC,t.id DESC LIMIT ?")
-        rows=conn.execute(sql,(*args,limit)).fetchall()
+             +clause+" ORDER BY t.tx_date DESC, CASE WHEN t.tx_time=\'\' THEN 1 ELSE 0 END ASC, t.tx_time DESC,t.id DESC LIMIT ? OFFSET ?")
+        rows=conn.execute(sql,(*args,limit,offset)).fetchall()
         count_row=conn.execute("SELECT COUNT(*) AS n FROM transactions t LEFT JOIN cards c ON c.id=t.card_id LEFT JOIN categories g ON g.id=t.category_id"+clause,args).fetchone()
         total=count_row['n'] if USING_POSTGRES else count_row[0]
     json_response(handler, {'transactions':[dict(r) for r in rows], 'total':total})
+
+def api_transaction_by_id(handler, tx_id):
+    with db() as conn:
+        row=conn.execute("""SELECT t.id,t.tx_date,t.tx_time,t.amount,t.card_id,t.category_id,t.content,t.user_percent,t.wife_percent,t.installment_months,
+            COALESCE(c.name,'(카드 없음)') card_name,COALESCE(g.name,'미정') category_name
+            FROM transactions t LEFT JOIN cards c ON c.id=t.card_id LEFT JOIN categories g ON g.id=t.category_id WHERE t.id=?""",(tx_id,)).fetchone()
+    if not row:
+        raise ValueError('지출 내역을 찾을 수 없습니다.')
+    json_response(handler, dict(row))
+
 
 def validate_transaction_payload(conn, data):
     tx_date=normalize_date(data.get("date")); tx_time=normalize_time(data.get("time")); amount=normalize_amount(data.get("amount")); card_id=int(data.get("card_id")); category_id=data.get("category_id"); content=str(data.get("content") or "").strip(); user_percent=int(data.get("user_percent",50)); installment_months=int(data.get("installment_months",1))
@@ -648,6 +659,8 @@ class Handler(BaseHTTPRequestHandler):
                 api_bootstrap(self)
             elif path == '/api/transactions':
                 api_transactions(self)
+            elif re.fullmatch(r'/api/transactions/\\d+', path):
+                api_transaction_by_id(self, int(path.rsplit('/',1)[1]))
             elif path == '/api/notes':
                 api_notes(self)
             elif re.fullmatch(r'/api/notes/toggle/\d+', path):
