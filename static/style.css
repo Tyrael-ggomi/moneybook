@@ -137,3 +137,8 @@ html,body{overflow-x:hidden}
   #dateFrom,#dateTo{color:#6b7280!important}
   #dateFrom:valid,#dateTo:valid{color:#111827!important}
 }
+
+
+/* v0.8.1 — visible labels for expense date filters */
+.filterDateLabel{display:block;font-size:13px;font-weight:700;margin-bottom:0}
+.filterDateLabel input{margin-top:6px}
