@@ -99,3 +99,28 @@ html,body{overflow-x:hidden}
   .filterDateGrid{display:grid!important;grid-template-columns:1fr 1fr!important;gap:8px!important}
   .filterDateGrid input[type="date"]{width:100%!important;min-width:0!important;max-width:100%!important}
 }
+
+
+/* v0.7.9 — iPhone native date/time controls: force exact box width */
+@media (max-width:640px){
+  #expenseForm input[type="date"],#expenseForm input[type="time"],
+  #editForm input[type="date"],#editForm input[type="time"],
+  #dateFrom,#dateTo{
+    -webkit-appearance:none!important;
+    appearance:none!important;
+    display:block!important;
+    width:100%!important;
+    min-width:0!important;
+    max-width:none!important;
+    height:48px!important;
+    margin-top:6px!important;
+    padding:0 13px!important;
+    border:1px solid #d1d5db!important;
+    border-radius:12px!important;
+    box-sizing:border-box!important;
+    background:#fff!important;
+    font:inherit!important;
+    font-size:16px!important;
+    color:#111827!important;
+  }
+}
