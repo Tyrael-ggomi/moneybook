@@ -592,7 +592,7 @@ def api_settlement_details(handler):
     month=q.get('month',[''])[0]
     kind=q.get('kind',['total'])[0]
     item_id=q.get('id',[''])[0]
-    if not re.fullmatch(r'\\d{4}-\\d{2}',month): raise ValueError('결산 월이 올바르지 않습니다.')
+    if not re.fullmatch(r'\d{4}-\d{2}',month): raise ValueError('결산 월이 올바르지 않습니다.')
     allowed={'total','user','wife','card','category'}
     if kind not in allowed: raise ValueError('결산 항목이 올바르지 않습니다.')
     if kind in ('card','category') and not item_id: raise ValueError('결산 항목 ID가 없습니다.')
