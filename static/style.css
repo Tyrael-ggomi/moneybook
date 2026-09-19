@@ -124,3 +124,16 @@ html,body{overflow-x:hidden}
     color:#111827!important;
   }
 }
+
+
+/* v0.8.0 — mobile date/time value vertical alignment + filter date hints */
+@media (max-width:640px){
+  #expenseForm input[type="date"],#expenseForm input[type="time"],
+  #editForm input[type="date"],#editForm input[type="time"],
+  #dateFrom,#dateTo{
+    line-height:48px!important;
+    vertical-align:middle!important;
+  }
+  #dateFrom,#dateTo{color:#6b7280!important}
+  #dateFrom:valid,#dateTo:valid{color:#111827!important}
+}
