@@ -74,3 +74,9 @@ html,body{overflow-x:hidden}
   .dateTimeGrid>label{display:block!important;width:100%!important;min-width:0!important}
   .dateTimeGrid input[type=date],.dateTimeGrid input[type=time]{display:block!important;width:100%!important;max-width:none!important;min-width:0!important}
 }
+
+
+/* v0.7.5 — date/time standalone layout */
+.dateTimeGrid{display:grid!important;grid-template-columns:minmax(0,1fr)!important;gap:0!important}
+.dateTimeGrid>label{width:100%!important;min-width:0!important}
+.dateTimeGrid input[type=date],.dateTimeGrid input[type=time]{width:100%!important;min-width:0!important;max-width:100%!important}
