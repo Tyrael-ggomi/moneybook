@@ -643,7 +643,7 @@ def api_settlement_details(handler):
         if kind=='user': value=allocation*int(r['user_percent'])/100
         elif kind=='wife': value=allocation*int(r['wife_percent'])/100
         else: value=allocation
-        out.append({'id':r['id'],'date':purchase.isoformat(),'time':r['tx_time'] or '','content':r['content'] or '(내용 없음)','card_name':card['name'],'category_name':cats.get(int(r['category_id']),{}).get('name','미정') if r['category_id'] is not None else '미정','amount':round(float(r['amount'])),'installment_months':n,'allocation':round(value),'user_percent':int(r['user_percent']),'wife_percent':int(r['wife_percent'])})
+        out.append({'id':r['id'],'date':purchase.isoformat(),'time':r['tx_time'] or '','content':r['content'] or '(내용 없음)','card_id':int(r['card_id']),'category_id':(int(r['category_id']) if r['category_id'] is not None else None),'card_name':card['name'],'category_name':cats.get(int(r['category_id']),{}).get('name','미정') if r['category_id'] is not None else '미정','amount':round(float(r['amount'])),'installment_months':n,'allocation':round(value),'user_percent':int(r['user_percent']),'wife_percent':int(r['wife_percent'])})
     total=sum(x['allocation'] for x in out)
     json_response(handler,{'month':month,'kind':kind,'total':total,'transactions':out})
 
