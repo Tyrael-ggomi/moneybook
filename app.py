@@ -255,10 +255,15 @@ def _ensure_auth_tables():
         passkey_id_type='SERIAL' if USING_POSTGRES else 'INTEGER'
         conn.execute(f"CREATE TABLE IF NOT EXISTS auth_passkeys (id {passkey_id_type} PRIMARY KEY,credential_id TEXT NOT NULL UNIQUE,public_key TEXT NOT NULL,sign_count INTEGER NOT NULL DEFAULT 0,transports TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL)")
         conn.execute(f"CREATE TABLE IF NOT EXISTS auth_challenges (id {passkey_id_type} PRIMARY KEY,kind TEXT NOT NULL,challenge TEXT NOT NULL,expires_at INTEGER NOT NULL)")
-        if not conn.execute("SELECT id FROM auth_users WHERE id=1").fetchone():
-            initial=os.environ.get('MONEYBOOK_AUTH_PASSWORD','').strip() or secrets.token_urlsafe(12)
+        configured=os.environ.get('MONEYBOOK_AUTH_PASSWORD','').strip()
+        existing=conn.execute("SELECT id,password_hash FROM auth_users WHERE id=1").fetchone()
+        if not existing:
+            initial=configured or secrets.token_urlsafe(12)
             conn.execute("INSERT INTO auth_users(id,password_hash,webauthn_user_id,created_at) VALUES(1,?,?,?)",(_password_hash(initial),_b64(secrets.token_bytes(32)),datetime.utcnow().isoformat())); conn.commit()
             print('============================================================'); print('머니북 초기 로그인 비밀번호:',initial); print('============================================================')
+        elif configured and not _password_check(configured,existing['password_hash']):
+            conn.execute("UPDATE auth_users SET password_hash=? WHERE id=1",(_password_hash(configured),)); conn.commit()
+            print('머니북 로그인 비밀번호를 MONEYBOOK_AUTH_PASSWORD 설정값으로 갱신했습니다.')
 def _auth_user(conn): return conn.execute("SELECT id,password_hash,webauthn_user_id FROM auth_users WHERE id=1").fetchone()
 def api_auth_status(handler):
     with db() as conn:
