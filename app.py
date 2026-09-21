@@ -5,6 +5,11 @@ import os
 import re
 import shutil
 import sqlite3
+import base64
+import hashlib
+import hmac
+import secrets
+import time
 
 try:
     import psycopg
@@ -17,6 +22,12 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
+try:
+    from webauthn import generate_registration_options, verify_registration_response, generate_authentication_options, verify_authentication_response, options_to_json, base64url_to_bytes
+    from webauthn.helpers.structs import AuthenticatorSelectionCriteria, AuthenticatorAttachment, ResidentKeyRequirement, UserVerificationRequirement, PublicKeyCredentialDescriptor
+    WEBAUTHN_AVAILABLE=True
+except ImportError:
+    WEBAUTHN_AVAILABLE=False
 
 APP_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
@@ -146,6 +157,7 @@ def ensure_schema():
             required = conn.execute("SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('cards','categories','transactions','settings','auto_rules','notes')").fetchone()
             if not required or int(required['n']) != 6:
                 raise RuntimeError('Supabase DB에 Moneybook 테이블이 아직 모두 만들어지지 않았습니다.')
+        _ensure_auth_tables()
         return
     with db() as conn:
         rule_cols={r[1] for r in conn.execute("PRAGMA table_info(auto_rules)").fetchall()}
@@ -175,6 +187,135 @@ def ensure_schema():
             max_order = max_order_row['max_order'] if USING_POSTGRES else max_order_row[0]
             conn.execute("INSERT INTO categories(name,active,sort_order) VALUES('미정',1,?)", (max_order+1,))
         conn.commit()
+    _ensure_auth_tables()
+
+
+AUTH_COOKIE='moneybook_session'
+AUTH_TTL=30*24*60*60
+CHALLENGE_TTL=5*60
+def _now_ts(): return int(time.time())
+def _b64(data): return base64.urlsafe_b64encode(data).rstrip(b'=').decode('ascii')
+def _unb64(value): return base64.urlsafe_b64decode(str(value)+'='*(-len(str(value))%4))
+def _password_hash(password,salt=None):
+    salt=salt or secrets.token_bytes(16)
+    digest=hashlib.scrypt(str(password).encode(),salt=salt,n=2**14,r=8,p=1,dklen=32)
+    return 'scrypt$'+_b64(salt)+'$'+_b64(digest)
+def _password_check(password,encoded):
+    try:
+        alg,salt,digest=str(encoded).split('$',2)
+        if alg!='scrypt': return False
+        candidate=hashlib.scrypt(str(password).encode(),salt=_unb64(salt),n=2**14,r=8,p=1,dklen=32)
+        return hmac.compare_digest(candidate,_unb64(digest))
+    except Exception: return False
+def _auth_secret(conn):
+    row=conn.execute("SELECT value FROM auth_meta WHERE key='session_secret'").fetchone()
+    if row: return str(row['value'])
+    secret=_b64(secrets.token_bytes(32)); conn.execute("INSERT INTO auth_meta(key,value) VALUES(?,?)",('session_secret',secret)); conn.commit(); return secret
+def _make_session(conn):
+    expires=_now_ts()+AUTH_TTL; payload='1.'+str(expires)
+    sig=_b64(hmac.new(_auth_secret(conn).encode(),payload.encode(),hashlib.sha256).digest())
+    return payload+'.'+sig
+def _valid_session(handler):
+    cookies={}
+    for part in handler.headers.get('Cookie','').split(';'):
+        if '=' in part:
+            k,v=part.strip().split('=',1); cookies[k]=v
+    parts=cookies.get(AUTH_COOKIE,'').split('.')
+    if len(parts)!=3 or parts[0]!='1': return False
+    try: expires=int(parts[1])
+    except ValueError: return False
+    if expires<_now_ts(): return False
+    with db() as conn: secret=_auth_secret(conn).encode()
+    expected=_b64(hmac.new(secret,('1.'+str(expires)).encode(),hashlib.sha256).digest())
+    return hmac.compare_digest(expected,parts[2])
+def _set_session_cookie(handler,token):
+    secure=' Secure;' if str(handler.headers.get('X-Forwarded-Proto','')).lower()=='https' or handler.server.server_port==443 else ''
+    handler.send_header('Set-Cookie',AUTH_COOKIE+'='+token+'; Path=/; HttpOnly; SameSite=Strict;'+secure+' Max-Age='+str(AUTH_TTL))
+def _clear_session_cookie(handler):
+    secure=' Secure;' if str(handler.headers.get('X-Forwarded-Proto','')).lower()=='https' or handler.server.server_port==443 else ''
+    handler.send_header('Set-Cookie',AUTH_COOKIE+'=; Path=/; HttpOnly; SameSite=Strict;'+secure+' Max-Age=0')
+def _public_origin(handler):
+    origin=os.environ.get('MONEYBOOK_ORIGIN','').strip(); rp_id=os.environ.get('MONEYBOOK_RP_ID','').strip()
+    forwarded=str(handler.headers.get('X-Forwarded-Proto','')).split(',')[0].strip()
+    proto=forwarded or ('https' if handler.server.server_port==443 else 'http')
+    host=str(handler.headers.get('Host','')).split(',')[0].strip()
+    if not origin: origin=proto+'://'+host
+    if not rp_id: rp_id=urlparse(origin).hostname or host.split(':')[0]
+    return rp_id,origin
+def _store_challenge(conn,kind,challenge):
+    conn.execute("DELETE FROM auth_challenges WHERE kind=?",(kind,)); conn.execute("INSERT INTO auth_challenges(kind,challenge,expires_at) VALUES(?,?,?)",(kind,_b64(challenge),_now_ts()+CHALLENGE_TTL)); conn.commit()
+def _take_challenge(conn,kind):
+    row=conn.execute("SELECT id,challenge,expires_at FROM auth_challenges WHERE kind=? ORDER BY id DESC LIMIT 1",(kind,)).fetchone()
+    if not row or int(row['expires_at'])<_now_ts(): return None
+    conn.execute("DELETE FROM auth_challenges WHERE id=?",(row['id'],)); conn.commit(); return _unb64(row['challenge'])
+def _ensure_auth_tables():
+    with db() as conn:
+        conn.execute("CREATE TABLE IF NOT EXISTS auth_users (id INTEGER PRIMARY KEY,password_hash TEXT NOT NULL,webauthn_user_id TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS auth_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS auth_passkeys (id INTEGER PRIMARY KEY,credential_id TEXT NOT NULL UNIQUE,public_key TEXT NOT NULL,sign_count INTEGER NOT NULL DEFAULT 0,transports TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL)")
+        conn.execute("CREATE TABLE IF NOT EXISTS auth_challenges (id INTEGER PRIMARY KEY,kind TEXT NOT NULL,challenge TEXT NOT NULL,expires_at INTEGER NOT NULL)")
+        if not conn.execute("SELECT id FROM auth_users WHERE id=1").fetchone():
+            initial=os.environ.get('MONEYBOOK_AUTH_PASSWORD','').strip() or secrets.token_urlsafe(12)
+            conn.execute("INSERT INTO auth_users(id,password_hash,webauthn_user_id,created_at) VALUES(1,?,?,?)",(_password_hash(initial),_b64(secrets.token_bytes(32)),datetime.utcnow().isoformat())); conn.commit()
+            print('============================================================'); print('머니북 초기 로그인 비밀번호:',initial); print('============================================================')
+def _auth_user(conn): return conn.execute("SELECT id,password_hash,webauthn_user_id FROM auth_users WHERE id=1").fetchone()
+def api_auth_status(handler):
+    with db() as conn:
+        row=conn.execute("SELECT COUNT(*) AS n FROM auth_passkeys").fetchone(); has=int(row['n'] if USING_POSTGRES else row[0])>0
+    json_response(handler,{'authenticated':_valid_session(handler),'passkey':has,'webauthn':WEBAUTHN_AVAILABLE})
+def api_auth_login(handler):
+    data=parse_body(handler)
+    with db() as conn:
+        user=_auth_user(conn)
+        if not user or not _password_check(data.get('password',''),user['password_hash']): raise PermissionError('비밀번호가 올바르지 않습니다.')
+        token=_make_session(conn)
+    raw=b'{"ok":true}'; handler.send_response(HTTPStatus.OK); handler.send_header('Content-Type','application/json; charset=utf-8'); handler.send_header('Content-Length',str(len(raw))); handler.send_header('Cache-Control','no-store'); _set_session_cookie(handler,token); handler.end_headers(); handler.wfile.write(raw)
+def api_auth_logout(handler):
+    raw=b'{"ok":true}'; handler.send_response(HTTPStatus.OK); handler.send_header('Content-Type','application/json; charset=utf-8'); handler.send_header('Content-Length',str(len(raw))); handler.send_header('Cache-Control','no-store'); _clear_session_cookie(handler); handler.end_headers(); handler.wfile.write(raw)
+def _require_webauthn(handler):
+    if not WEBAUTHN_AVAILABLE: raise RuntimeError('WebAuthn 모듈이 설치되지 않았습니다. Render 재배포 후 다시 시도하세요.')
+def api_passkey_register_options(handler):
+    _require_webauthn(handler)
+    if not _valid_session(handler): raise PermissionError('로그인 후 Face ID를 등록할 수 있습니다.')
+    rp_id,_=_public_origin(handler)
+    with db() as conn:
+        user=_auth_user(conn); rows=conn.execute("SELECT credential_id FROM auth_passkeys").fetchall()
+        exclude=[PublicKeyCredentialDescriptor(id=_unb64(r['credential_id'])) for r in rows]
+        options=generate_registration_options(rp_id=rp_id,rp_name='머니북',user_id=_unb64(user['webauthn_user_id']),user_name='moneybook',user_display_name='머니북',authenticator_selection=AuthenticatorSelectionCriteria(authenticator_attachment=AuthenticatorAttachment.PLATFORM,resident_key=ResidentKeyRequirement.REQUIRED,user_verification=UserVerificationRequirement.REQUIRED),exclude_credentials=exclude)
+        _store_challenge(conn,'register',options.challenge)
+    json_response(handler,json.loads(options_to_json(options)))
+def api_passkey_register_verify(handler):
+    _require_webauthn(handler)
+    if not _valid_session(handler): raise PermissionError('로그인이 필요합니다.')
+    data=parse_body(handler); rp_id,origin=_public_origin(handler)
+    with db() as conn:
+        challenge=_take_challenge(conn,'register')
+        if not challenge: raise ValueError('Face ID 등록 시간이 만료되었습니다. 다시 시도하세요.')
+        verification=verify_registration_response(credential=data,expected_challenge=challenge,expected_rp_id=rp_id,expected_origin=origin,require_user_verification=True)
+        try:
+            conn.execute("INSERT INTO auth_passkeys(credential_id,public_key,sign_count,transports,created_at) VALUES(?,?,?,?,?)",(_b64(verification.credential_id),_b64(verification.credential_public_key),int(verification.sign_count),json.dumps(data.get('response',{}).get('transports') or ['internal']),datetime.utcnow().isoformat()))
+        except INTEGRITY_ERROR: raise ValueError('이미 등록된 Face ID입니다.')
+        conn.commit()
+    json_response(handler,{'ok':True})
+def api_passkey_auth_options(handler):
+    _require_webauthn(handler)
+    with db() as conn:
+        rows=conn.execute("SELECT credential_id,transports FROM auth_passkeys ORDER BY id").fetchall()
+        if not rows: raise ValueError('등록된 Face ID가 없습니다. 먼저 비밀번호로 로그인한 뒤 Face ID를 등록하세요.')
+        allow=[PublicKeyCredentialDescriptor(id=_unb64(r['credential_id']),transports=json.loads(r['transports'] or '[]')) for r in rows]
+        options=generate_authentication_options(rp_id=_public_origin(handler)[0],allow_credentials=allow,user_verification=UserVerificationRequirement.REQUIRED); _store_challenge(conn,'authenticate',options.challenge)
+    json_response(handler,json.loads(options_to_json(options)))
+def api_passkey_auth_verify(handler):
+    _require_webauthn(handler)
+    data=parse_body(handler); rp_id,origin=_public_origin(handler); credential_id=str(data.get('rawId') or data.get('id') or '')
+    with db() as conn:
+        row=conn.execute("SELECT id,public_key,sign_count FROM auth_passkeys WHERE credential_id=?",(credential_id,)).fetchone()
+        if not row: raise PermissionError('등록된 Face ID를 찾을 수 없습니다.')
+        challenge=_take_challenge(conn,'authenticate')
+        if not challenge: raise ValueError('Face ID 로그인 시간이 만료되었습니다. 다시 시도하세요.')
+        verification=verify_authentication_response(credential=data,expected_challenge=challenge,expected_rp_id=rp_id,expected_origin=origin,credential_public_key=_unb64(row['public_key']),credential_current_sign_count=int(row['sign_count']),require_user_verification=True)
+        conn.execute("UPDATE auth_passkeys SET sign_count=? WHERE id=?",(int(verification.new_sign_count),row['id'])); token=_make_session(conn); conn.commit()
+    raw=b'{"ok":true}'; handler.send_response(HTTPStatus.OK); handler.send_header('Content-Type','application/json; charset=utf-8'); handler.send_header('Content-Length',str(len(raw))); handler.send_header('Cache-Control','no-store'); _set_session_cookie(handler,token); handler.end_headers(); handler.wfile.write(raw)
 
 def normalize_time(value):
     s=str(value or '').strip()
@@ -649,12 +790,18 @@ def api_settlement_details(handler):
 
 
 class Handler(BaseHTTPRequestHandler):
+    def _auth_required(self):
+        path=urlparse(self.path).path
+        return path.startswith('/api/') and not path.startswith('/api/auth/') and path!='/api/auth/status'
+
     def log_message(self, fmt, *args):
         print('[HTTP]', fmt % args)
 
     def do_GET(self):
         try:
             path = urlparse(self.path).path
+            if path == '/api/auth/status': api_auth_status(self); return
+            if self._auth_required() and not _valid_session(self): json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED); return
             if path == '/api/bootstrap':
                 api_bootstrap(self)
             elif path == '/api/transactions':
@@ -687,6 +834,16 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             path = urlparse(self.path).path
+            if path.startswith('/api/auth/'):
+                if path == '/api/auth/login': api_auth_login(self)
+                elif path == '/api/auth/logout': api_auth_logout(self)
+                elif path == '/api/auth/passkey/register/options': api_passkey_register_options(self)
+                elif path == '/api/auth/passkey/register/verify': api_passkey_register_verify(self)
+                elif path == '/api/auth/passkey/authenticate/options': api_passkey_auth_options(self)
+                elif path == '/api/auth/passkey/authenticate/verify': api_passkey_auth_verify(self)
+                else: json_response(self, {'ok':False,'error':'Not found'}, HTTPStatus.NOT_FOUND)
+                return
+            if self._auth_required() and not _valid_session(self): json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED); return
             if path == '/api/transactions':
                 api_add_transaction(self)
             elif path == '/api/transactions/import':
