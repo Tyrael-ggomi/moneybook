@@ -252,8 +252,9 @@ def _ensure_auth_tables():
     with db() as conn:
         conn.execute("CREATE TABLE IF NOT EXISTS auth_users (id INTEGER PRIMARY KEY,password_hash TEXT NOT NULL,webauthn_user_id TEXT NOT NULL UNIQUE,created_at TEXT NOT NULL)")
         conn.execute("CREATE TABLE IF NOT EXISTS auth_meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-        conn.execute("CREATE TABLE IF NOT EXISTS auth_passkeys (id INTEGER PRIMARY KEY,credential_id TEXT NOT NULL UNIQUE,public_key TEXT NOT NULL,sign_count INTEGER NOT NULL DEFAULT 0,transports TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL)")
-        conn.execute("CREATE TABLE IF NOT EXISTS auth_challenges (id INTEGER PRIMARY KEY,kind TEXT NOT NULL,challenge TEXT NOT NULL,expires_at INTEGER NOT NULL)")
+        passkey_id_type='SERIAL' if USING_POSTGRES else 'INTEGER'
+        conn.execute(f"CREATE TABLE IF NOT EXISTS auth_passkeys (id {passkey_id_type} PRIMARY KEY,credential_id TEXT NOT NULL UNIQUE,public_key TEXT NOT NULL,sign_count INTEGER NOT NULL DEFAULT 0,transports TEXT NOT NULL DEFAULT '[]',created_at TEXT NOT NULL)")
+        conn.execute(f"CREATE TABLE IF NOT EXISTS auth_challenges (id {passkey_id_type} PRIMARY KEY,kind TEXT NOT NULL,challenge TEXT NOT NULL,expires_at INTEGER NOT NULL)")
         if not conn.execute("SELECT id FROM auth_users WHERE id=1").fetchone():
             initial=os.environ.get('MONEYBOOK_AUTH_PASSWORD','').strip() or secrets.token_urlsafe(12)
             conn.execute("INSERT INTO auth_users(id,password_hash,webauthn_user_id,created_at) VALUES(1,?,?,?)",(_password_hash(initial),_b64(secrets.token_bytes(32)),datetime.utcnow().isoformat())); conn.commit()
