@@ -1,3 +1,19 @@
+
+let authState={authenticated:false,passkey:false,webauthn:false};
+const b64uToBytes=s=>{s=s.replace(/-/g,'+').replace(/_/g,'/');while(s.length%4)s+='=';const bin=atob(s);return Uint8Array.from(bin,c=>c.charCodeAt(0))};
+const bytesToB64u=b=>{let s='';const a=new Uint8Array(b);for(const x of a)s+=String.fromCharCode(x);return btoa(s).replace(/\+/g,'-').replace(/\//g,'_').replace(/=+$/,'')};
+function publicKeyFromJSON(o){const x=JSON.parse(JSON.stringify(o));if(x.challenge)x.challenge=b64uToBytes(x.challenge);if(x.user?.id)x.user.id=b64uToBytes(x.user.id);if(x.excludeCredentials)x.excludeCredentials=x.excludeCredentials.map(c=>({...c,id:b64uToBytes(c.id)}));if(x.allowCredentials)x.allowCredentials=x.allowCredentials.map(c=>({...c,id:b64uToBytes(c.id)}));return x}
+function credentialToJSON(c){const r={id:c.id,rawId:bytesToB64u(c.rawId),type:c.type,response:{}};if(c.response.clientDataJSON)r.response.clientDataJSON=bytesToB64u(c.response.clientDataJSON);if(c.response.attestationObject)r.response.attestationObject=bytesToB64u(c.response.attestationObject);if(c.response.authenticatorData)r.response.authenticatorData=bytesToB64u(c.response.authenticatorData);if(c.response.signature)r.response.signature=bytesToB64u(c.response.signature);if(c.response.userHandle)r.response.userHandle=bytesToB64u(c.response.userHandle);if(c.response.getTransports)r.response.transports=c.response.getTransports();return r}
+async function authFetch(url,opt={}){const r=await fetch(url,{...opt,headers:{...(opt.headers||{}),'Cache-Control':'no-store'}});let d={};try{d=await r.json()}catch{}if(!r.ok)throw Error(d.error||'인증에 실패했습니다.');return d}
+function showLogin(){$('authScreen')?.classList.remove('hidden');document.body.classList.add('authLocked')}
+function hideLogin(){$('authScreen')?.classList.add('hidden');document.body.classList.remove('authLocked')}
+async function passwordLogin(){const i=$('authPassword'),b=$('passwordLoginBtn'),m=$('authMessage');b.disabled=true;m.textContent='';try{await authFetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({password:i.value})});i.value='';hideLogin();await startApp()}catch(e){m.textContent=e.message}finally{b.disabled=false}}
+async function passkeyLogin(){const b=$('passkeyLoginBtn'),m=$('authMessage');b.disabled=true;m.textContent='';try{if(!window.PublicKeyCredential)throw Error('이 브라우저에서는 Face ID 로그인을 사용할 수 없습니다.');const o=await authFetch('/api/auth/passkey/authenticate/options',{method:'POST'});const c=await navigator.credentials.get({publicKey:publicKeyFromJSON(o)});if(!c)throw Error('Face ID 인증이 취소되었습니다.');await authFetch('/api/auth/passkey/authenticate/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(credentialToJSON(c))});hideLogin();await startApp()}catch(e){m.textContent=e.message}finally{b.disabled=false}}
+async function registerPasskey(){try{const o=await authFetch('/api/auth/passkey/register/options',{method:'POST'});const c=await navigator.credentials.create({publicKey:publicKeyFromJSON(o)});if(!c)throw Error('Face ID 등록이 취소되었습니다.');await authFetch('/api/auth/passkey/register/verify',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(credentialToJSON(c))});alert('Face ID 등록이 완료되었습니다.');authState.passkey=true;renderSecurity()}catch(e){alert(e.message)}}
+async function logout(){try{await authFetch('/api/auth/logout',{method:'POST'})}catch{}location.reload()}
+function renderSecurity(){const s=$('securityStatus'),b=$('registerPasskeyBtn');if(!s||!b)return;s.textContent=authState.passkey?'Face ID 등록됨':'Face ID 미등록';b.textContent=authState.passkey?'Face ID 다시 등록':'Face ID 등록'}
+async function loadAuthStatus(){try{authState=await authFetch('/api/auth/status');renderSecurity()}catch{}}
+
 const $=id=>document.getElementById(id);
 function requireEl(id){const el=$(id);if(!el)throw new Error(`설정 화면이 최신 버전으로 로드되지 않았습니다. 페이지를 새로고침해 주세요. (누락: ${id})`);return el}let boot=null,editingId=null,lastTransactions=[],importDuplicateFlags=[],listLimit=100;
 const money=n=>Number(n).toLocaleString('ko-KR')+'원';
@@ -68,6 +84,8 @@ function settlementGridHtml(data){
     ${catRows || '<div class="empty">내역 없음</div>'}
   </div>`;
 }
+async function startApp(){reset(false);inst('installment');inst('editInstallment');$('ratio').oninput=ratio;$('editRatio').oninput=eratio;ratio();eratio();await loadBoot();await list();await loadNotes();await loadAuthStatus()}
+
 function setView(viewId){
   document.querySelectorAll('.navBtn').forEach(b=>b.classList.toggle('active',b.dataset.view===viewId));
   document.querySelectorAll('.expenseView').forEach(s=>s.classList.toggle('hidden',viewId!=='expenseView'));
