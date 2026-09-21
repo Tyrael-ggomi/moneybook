@@ -396,3 +396,27 @@ $('importSaveBtn').onclick=async()=>{if(!importRows.length)return;const ratioVal
 
 document.addEventListener('click',e=>{const b=e.target.closest('.settleLink');if(!b)return;openSettlementDetails(b.dataset.settleKind,b.dataset.settleId,b.dataset.settleMonth)});$('closeSettlementDetail').onclick=closeSettlementDetails;$('settlementDetailModal').onclick=e=>{if(e.target.id==='settlementDetailModal')closeSettlementDetails()};
 $('loadMoreBtn').onclick=()=>{listLimit+=100;list().catch(e=>msg(e.message))};
+
+
+// Face ID / password authentication bootstrap
+$('passwordLoginBtn').onclick=passwordLogin;
+$('passkeyLoginBtn').onclick=passkeyLogin;
+$('registerPasskeyBtn').onclick=registerPasskey;
+$('logoutBtn').onclick=logout;
+
+async function bootAuth(){
+  try{
+    authState=await authFetch('/api/auth/status');
+    renderSecurity();
+    if(authState.authenticated){
+      hideLogin();
+      await startApp();
+    }else{
+      showLogin();
+    }
+  }catch(e){
+    showLogin();
+    $('authMessage').textContent='로그인 화면을 불러오지 못했습니다. 잠시 후 새로고침해 주세요.';
+  }
+}
+bootAuth();
