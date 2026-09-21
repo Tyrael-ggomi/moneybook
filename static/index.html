@@ -9,6 +9,7 @@
 <link rel="stylesheet" href="/style.css?v=0.7.6">
 </head>
 <body>
+<div id="authScreen" class="authScreen hidden"><div class="authBox"><div class="authBrand">머니북</div><div class="authSub">안전하게 잠금 해제하세요</div><button id="passkeyLoginBtn" class="primary authFaceBtn" type="button">🔐 Face ID로 로그인</button><div class="authDivider"><span>또는</span></div><input id="authPassword" type="password" autocomplete="current-password" placeholder="비밀번호"><button id="passwordLoginBtn" type="button">비밀번호로 로그인</button><p id="authMessage" class="message"></p></div></div>
 <nav class="topNav">
   <button class="navBtn active" data-view="expenseView">지출 입력</button>
   <button class="navBtn" data-view="settlementView">결산</button>
@@ -64,9 +65,9 @@
     <div class="settingsSection"><h2>이름</h2><form id="namesForm" class="settingsForm"><div class="grid2"><label>내 이름<input id="settingsUserName" type="text" required></label><label>배우자 이름<input id="settingsWifeName" type="text" required></label></div><button class="primary" type="submit">저장</button><p id="namesMessage" class="message"></p></form></div>
     <div class="settingsSection"><h2>카드</h2><form id="cardAddForm" class="settingsInline"><input id="newCardName" type="text" placeholder="카드 이름" autocomplete="off"><button class="primary" type="submit">추가</button></form><div id="cardsSettingsList" class="settingsList"></div></div>
     <div class="settingsSection"><h2>카테고리</h2><form id="categoryAddForm" class="settingsInline"><input id="newCategoryName" type="text" placeholder="카테고리 이름" autocomplete="off"><button class="primary" type="submit">추가</button></form><div id="categoriesSettingsList" class="settingsList"></div></div>
-    <div class="settingsSection"><h2>자동분류</h2><form id="ruleAddForm" class="settingsRuleForm"><input id="newRuleKeyword" type="text" placeholder="키워드 예: 스타벅스" autocomplete="off"><select id="newRuleCategory"></select><button class="primary" type="submit">추가</button></form><div class="settingsHint">내용에 키워드가 포함되면 해당 카테고리로 자동 분류됩니다.</div><div id="rulesSettingsList" class="settingsList"></div></div>
+    <div class="settingsSection"><h2>보안</h2><div class="securityRow"><div><strong>Face ID</strong><div id="securityStatus" class="settingsHint">확인 중…</div></div><button id="registerPasskeyBtn" type="button" class="primary">Face ID 등록</button><button id="logoutBtn" type="button">로그아웃</button></div></div><div class="settingsSection"><h2>자동분류</h2><form id="ruleAddForm" class="settingsRuleForm"><input id="newRuleKeyword" type="text" placeholder="키워드 예: 스타벅스" autocomplete="off"><select id="newRuleCategory"></select><button class="primary" type="submit">추가</button></form><div class="settingsHint">내용에 키워드가 포함되면 해당 카테고리로 자동 분류됩니다.</div><div id="rulesSettingsList" class="settingsList"></div></div>
   </section>
 </section>
 </main>
-<script src="/app.js?v=0.7.6"></script>
+<script src="/app.js?v=0.9.0"></script>
 </body></html>
