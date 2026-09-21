@@ -40,7 +40,19 @@ async function del(){if(!editingId)return;let t=lastTransactions.find(x=>x.id===
 let timer;function filter(){clearTimeout(timer);timer=setTimeout(()=>list().catch(e=>msg(e.message)),250)}
 $('expenseForm').onsubmit=submit;$('ratio').oninput=ratio;$('amount').oninput=()=>fmt('amount');$('resetBtn').onclick=()=>reset();$('editForm').onsubmit=saveEdit;$('editRatio').oninput=eratio;$('editAmount').oninput=()=>fmt('editAmount');$('closeModal').onclick=closeEdit;$('deleteBtn').onclick=del;$('editModal').onclick=e=>{if(e.target.id==='editModal')closeEdit()};$('search').oninput=filter;$('filterReset').onclick=()=>{['search','dateFrom','dateTo'].forEach(id=>$(id).value='');$('filterCard').value='';$('filterCategory').value='';list().catch(e=>msg(e.message))};['dateFrom','dateTo','filterCard','filterCategory'].forEach(id=>$(id).onchange=()=>list().catch(e=>msg(e.message)));
 $('selectAllTransactions').onchange=()=>{if($('selectAllTransactions').checked)lastTransactions.forEach(t=>selectedTx.add(t.id));else lastTransactions.forEach(t=>selectedTx.delete(t.id));render({transactions:lastTransactions,total:lastTransactions.length})};$('bulkCategoryBtn').onclick=bulkCategory;$('bulkCategorySave').onclick=bulkCategorySave;$('bulkCategoryCancel').onclick=()=>$('bulkCategoryModal').classList.add('hidden');$('bulkCategoryClose').onclick=()=>$('bulkCategoryModal').classList.add('hidden');$('bulkDeleteBtn').onclick=bulkDelete;$('bulkClearBtn').onclick=()=>{selectedTx.clear();render({transactions:lastTransactions,total:lastTransactions.length})};
-inst('installment');inst('editInstallment');$('date').value=new Date().toISOString().slice(0,10);$('time').value=new Date().toTimeString().slice(0,5);ratio();fetch('/api/bootstrap').then(r=>r.json()).then(x=>{boot=x;selects();return list()}).catch(e=>{$('dbStatus').textContent='연결 실패';msg(e.message)})
+$('passwordLoginBtn').onclick=passwordLogin;
+$('passkeyLoginBtn').onclick=passkeyLogin;
+$('registerPasskeyBtn').onclick=registerPasskey;
+$('logoutBtn').onclick=logout;
+async function bootAuth(){
+  try{
+    authState=await authFetch('/api/auth/status');
+    $('passkeyLoginBtn').hidden=!authState.passkey;
+    if(authState.authenticated){hideLogin();await startApp()}
+    else showLogin();
+  }catch(e){showLogin();$('authMessage').textContent=e.message}
+}
+bootAuth();
 
 let settlementCenter = new Date();
 settlementCenter.setDate(1);
