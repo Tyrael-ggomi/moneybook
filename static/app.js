@@ -96,6 +96,8 @@ function settlementGridHtml(data){
     ${catRows || '<div class="empty">내역 없음</div>'}
   </div>`;
 }
+async function loadBoot(){const r=await fetch('/api/bootstrap',{cache:'no-store'});const x=await r.json();if(!r.ok)throw Error(x.error||'머니북 데이터를 불러오지 못했습니다.');boot=x;selects()}
+
 async function startApp(){reset(false);inst('installment');inst('editInstallment');$('ratio').oninput=ratio;$('editRatio').oninput=eratio;ratio();eratio();await loadBoot();await list();await loadNotes();await loadAuthStatus()}
 
 function setView(viewId){
