@@ -24,7 +24,7 @@ from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 try:
     from webauthn import generate_registration_options, verify_registration_response, generate_authentication_options, verify_authentication_response, options_to_json, base64url_to_bytes
-    from webauthn.helpers.structs import AuthenticatorSelectionCriteria, AuthenticatorAttachment, ResidentKeyRequirement, UserVerificationRequirement, PublicKeyCredentialDescriptor
+    from webauthn.helpers.structs import AuthenticatorSelectionCriteria, AuthenticatorAttachment, ResidentKeyRequirement, UserVerificationRequirement, PublicKeyCredentialDescriptor, AuthenticatorTransport
     WEBAUTHN_AVAILABLE=True
 except ImportError:
     WEBAUTHN_AVAILABLE=False
@@ -303,7 +303,7 @@ def api_passkey_auth_options(handler):
     with db() as conn:
         rows=conn.execute("SELECT credential_id,transports FROM auth_passkeys ORDER BY id").fetchall()
         if not rows: raise ValueError('등록된 Face ID가 없습니다. 먼저 비밀번호로 로그인한 뒤 Face ID를 등록하세요.')
-        allow=[PublicKeyCredentialDescriptor(id=_unb64(r['credential_id']),transports=json.loads(r['transports'] or '[]')) for r in rows]
+        allow=[PublicKeyCredentialDescriptor(id=_unb64(r['credential_id']),transports=[AuthenticatorTransport.INTERNAL]) for r in rows]
         options=generate_authentication_options(rp_id=_public_origin(handler)[0],allow_credentials=allow,user_verification=UserVerificationRequirement.REQUIRED); _store_challenge(conn,'authenticate',options.challenge)
     json_response(handler,json.loads(options_to_json(options)))
 def api_passkey_auth_verify(handler):
