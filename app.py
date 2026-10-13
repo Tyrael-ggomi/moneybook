@@ -10,6 +10,16 @@ import hashlib
 import hmac
 import secrets
 import time
+import threading
+import gzip
+import urllib.parse
+import urllib.request
+import urllib.error
+
+try:
+    from cryptography.fernet import Fernet
+except ImportError:
+    Fernet = None
 
 try:
     import psycopg
@@ -42,21 +52,33 @@ class DBConn:
     def __init__(self, raw, postgres=False):
         self.raw = raw
         self.postgres = postgres
+        self._backup_dirty = False
+
+    def _track_backup_change(self, sql):
+        if re.match(r'^\s*(?:(?:INSERT(?:\s+OR\s+\w+)?\s+INTO)|UPDATE|DELETE\s+FROM)\s+["\x60]?(cards|categories|transactions|settings|auto_rules|notes|auth_users|auth_passkeys)\b', str(sql), re.I):
+            self._backup_dirty = True
 
     def __enter__(self):
         self.raw.__enter__()
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        # Also track writes in callers that rely on the connection context manager
+        # to commit implicitly instead of calling conn.commit() themselves.
+        if exc_type is None:
+            self.commit()
+            return self.raw.__exit__(None, None, None)
         return self.raw.__exit__(exc_type, exc, tb)
 
     def _sql(self, sql):
         return sql.replace('?', '%s') if self.postgres else sql
 
     def execute(self, sql, params=()):
+        self._track_backup_change(sql)
         return self.raw.execute(self._sql(sql), params)
 
     def executemany(self, sql, params):
+        self._track_backup_change(sql)
         sql = self._sql(sql)
         if self.postgres:
             with self.raw.cursor() as cur:
@@ -64,7 +86,14 @@ class DBConn:
         return self.raw.executemany(sql, params)
 
     def commit(self):
-        return self.raw.commit()
+        self.raw.commit()
+        if self._backup_dirty:
+            self._backup_dirty = False
+            now = int(time.time())
+            sql = "INSERT INTO backup_state(id,last_change_at,status) VALUES(1,?,'pending') ON CONFLICT(id) DO UPDATE SET last_change_at=excluded.last_change_at,status='pending',last_error=NULL"
+            self.raw.execute(self._sql(sql), (now,))
+            self.raw.commit()
+            _schedule_backup_timer(600)
 
     def close(self):
         return self.raw.close()
@@ -152,6 +181,7 @@ def get_settings(conn):
 
 def ensure_schema():
     """Keep the local SQLite schema compatible; Supabase schema is created by migration SQL."""
+    _ensure_backup_table()
     if USING_POSTGRES:
         with db() as conn:
             required = conn.execute("SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('cards','categories','transactions','settings','auto_rules','notes')").fetchone()
@@ -188,6 +218,261 @@ def ensure_schema():
             conn.execute("INSERT INTO categories(name,active,sort_order) VALUES('미정',1,?)", (max_order+1,))
         conn.commit()
     _ensure_auth_tables()
+
+
+
+
+# Dropbox automatic backup ----------------------------------------------------
+BACKUP_TABLES = ("cards", "categories", "settings", "auto_rules", "transactions", "notes", "auth_users", "auth_passkeys")
+BACKUP_QUIET_SECONDS = 10 * 60
+_backup_timer = None
+_backup_timer_lock = threading.Lock()
+_backup_run_lock = threading.Lock()
+
+
+def _ensure_backup_table():
+    with db() as conn:
+        conn.execute("""CREATE TABLE IF NOT EXISTS backup_state (
+            id INTEGER PRIMARY KEY,
+            last_change_at BIGINT NOT NULL DEFAULT 0,
+            status TEXT NOT NULL DEFAULT 'idle',
+            last_attempt_at BIGINT,
+            last_success_at BIGINT,
+            last_file TEXT,
+            last_size_bytes BIGINT,
+            last_error TEXT
+        )""")
+        conn.execute("INSERT INTO backup_state(id,last_change_at,status) VALUES(1,0,'idle') ON CONFLICT(id) DO NOTHING")
+        conn.commit()
+
+
+def _dropbox_configured():
+    return all(os.environ.get(k, "").strip() for k in (
+        "DROPBOX_APP_KEY", "DROPBOX_APP_SECRET", "DROPBOX_REFRESH_TOKEN", "BACKUP_ENCRYPTION_KEY"
+    )) and Fernet is not None
+
+
+def _backup_state(conn=None):
+    own = conn is None
+    if own:
+        conn = db()
+    try:
+        row = conn.execute("SELECT * FROM backup_state WHERE id=1").fetchone()
+        return dict(row) if row else None
+    finally:
+        if own:
+            conn.close()
+
+
+def _set_backup_state(**fields):
+    allowed = {"last_change_at", "status", "last_attempt_at", "last_success_at", "last_file", "last_size_bytes", "last_error"}
+    fields = {k: v for k, v in fields.items() if k in allowed}
+    if not fields:
+        return
+    assignments = ", ".join(f"{k}=?" for k in fields)
+    with db() as conn:
+        conn.execute(f"UPDATE backup_state SET {assignments} WHERE id=1", tuple(fields.values()))
+        conn.commit()
+
+
+def _dropbox_json_request(url, payload, access_token=None):
+    headers = {"Content-Type": "application/json"}
+    if access_token:
+        headers["Authorization"] = "Bearer " + access_token
+    req = urllib.request.Request(url, data=json.dumps(payload).encode("utf-8"), headers=headers, method="POST")
+    with urllib.request.urlopen(req, timeout=45) as response:
+        return json.loads(response.read().decode("utf-8"))
+
+
+def _dropbox_access_token():
+    form = urllib.parse.urlencode({
+        "grant_type": "refresh_token",
+        "refresh_token": os.environ["DROPBOX_REFRESH_TOKEN"].strip(),
+        "client_id": os.environ["DROPBOX_APP_KEY"].strip(),
+        "client_secret": os.environ["DROPBOX_APP_SECRET"].strip(),
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.dropboxapi.com/oauth2/token", data=form,
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=30) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    token = str(result.get("access_token") or "")
+    if not token:
+        raise RuntimeError("Dropbox 인증에 실패했습니다.")
+    return token
+
+
+def _upload_dropbox_backup(filename, encrypted_bytes):
+    access_token = _dropbox_access_token()
+    prefix = os.environ.get("DROPBOX_BACKUP_PATH", "").strip().rstrip("/")
+    path = (prefix + "/" if prefix else "/") + filename
+    args = json.dumps({
+        "path": path,
+        "mode": "add",
+        "autorename": True,
+        "mute": True,
+        "strict_conflict": False
+    }, separators=(",", ":"))
+    req = urllib.request.Request(
+        "https://content.dropboxapi.com/2/files/upload",
+        data=encrypted_bytes,
+        headers={
+            "Authorization": "Bearer " + access_token,
+            "Dropbox-API-Arg": args,
+            "Content-Type": "application/octet-stream"
+        },
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=90) as response:
+        result = json.loads(response.read().decode("utf-8"))
+    return str(result.get("path_display") or path)
+
+
+def _run_due_backup():
+    if not _backup_run_lock.acquire(blocking=False):
+        return
+    try:
+        state = _backup_state()
+        if not state:
+            return
+        now = int(time.time())
+        changed_at = int(state.get("last_change_at") or 0)
+        status = str(state.get("status") or "")
+        if not changed_at or now < changed_at + BACKUP_QUIET_SECONDS:
+            return
+        if status == "success" and int(state.get("last_success_at") or 0) >= changed_at:
+            return
+        last_attempt = int(state.get("last_attempt_at") or 0)
+        if status == "failed" and now < last_attempt + BACKUP_QUIET_SECONDS:
+            return
+        if not _dropbox_configured():
+            _set_backup_state(status="waiting_config", last_error="Dropbox 환경 변수 설정이 필요합니다.")
+            return
+        if Fernet is None:
+            _set_backup_state(status="failed", last_attempt_at=now, last_error="암호화 모듈이 설치되지 않았습니다.")
+            return
+
+        _set_backup_state(status="uploading", last_attempt_at=now, last_error=None)
+        try:
+            key = os.environ["BACKUP_ENCRYPTION_KEY"].strip().encode("ascii")
+            cipher = Fernet(key)
+            payload = {"format": "moneybook-backup-v1", "created_at": datetime.utcnow().isoformat() + "Z",
+                       "tables": {}}
+            with db() as conn:
+                for table in BACKUP_TABLES:
+                    payload["tables"][table] = [dict(row) for row in conn.execute(f"SELECT * FROM {table}").fetchall()]
+            raw = json.dumps(payload, ensure_ascii=False, default=_json_default, separators=(",", ":")).encode("utf-8")
+            compressed = gzip.compress(raw, compresslevel=6)
+            encrypted = cipher.encrypt(compressed)
+            stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+            filename = f"moneybook-backup-{stamp}.json.gz.fernet"
+            uploaded_path = _upload_dropbox_backup(filename, encrypted)
+            latest = _backup_state()
+            latest_change = int((latest or {}).get("last_change_at") or 0)
+            if latest_change > changed_at:
+                _set_backup_state(status="pending", last_success_at=now, last_file=uploaded_path, last_size_bytes=len(encrypted), last_error=None)
+                _schedule_backup_timer(max(1, latest_change + BACKUP_QUIET_SECONDS - int(time.time())))
+            else:
+                _set_backup_state(status="success", last_success_at=now, last_file=uploaded_path, last_size_bytes=len(encrypted), last_error=None)
+        except Exception as exc:
+            # Do not expose OAuth credentials, tokens, or provider response bodies.
+            reason = "Dropbox 백업에 실패했습니다. 인증·권한·암호화 키 설정을 확인하세요."
+            if isinstance(exc, (ValueError, TypeError)) and "fernet" in str(exc).lower():
+                reason = "암호화 키 형식이 올바르지 않습니다. Render 환경 변수를 확인하세요."
+            _set_backup_state(status="failed", last_attempt_at=now, last_error=reason)
+    finally:
+        _backup_run_lock.release()
+
+
+def _schedule_backup_timer(delay):
+    global _backup_timer
+    with _backup_timer_lock:
+        if _backup_timer is not None:
+            _backup_timer.cancel()
+        _backup_timer = threading.Timer(max(0, float(delay)), _run_due_backup)
+        _backup_timer.daemon = True
+        _backup_timer.start()
+
+
+def _maybe_schedule_due_backup():
+    state = _backup_state()
+    if not state:
+        return
+    now = int(time.time())
+    changed_at = int(state.get("last_change_at") or 0)
+    if not changed_at:
+        return
+    status = str(state.get("status") or "")
+    if status == "success" and int(state.get("last_success_at") or 0) >= changed_at:
+        return
+    if not _dropbox_configured():
+        return
+    if status == "failed" and now < int(state.get("last_attempt_at") or 0) + BACKUP_QUIET_SECONDS:
+        return
+    _schedule_backup_timer(max(0, changed_at + BACKUP_QUIET_SECONDS - now))
+
+
+def api_backup_status(handler):
+    state = _backup_state() or {}
+    json_response(handler, {
+        "configured": _dropbox_configured(),
+        "status": state.get("status", "idle"),
+        "last_change_at": state.get("last_change_at"),
+        "last_attempt_at": state.get("last_attempt_at"),
+        "last_success_at": state.get("last_success_at"),
+        "last_file": state.get("last_file"),
+        "last_size_bytes": state.get("last_size_bytes"),
+        "last_error": state.get("last_error"),
+        "quiet_seconds": BACKUP_QUIET_SECONDS
+    })
+
+
+def api_dropbox_authorize_url(handler):
+    app_key = os.environ.get("DROPBOX_APP_KEY", "").strip()
+    if not app_key:
+        raise ValueError("Render에 DROPBOX_APP_KEY를 먼저 설정하세요.")
+    url = "https://www.dropbox.com/oauth2/authorize?" + urllib.parse.urlencode({
+        "client_id": app_key,
+        "response_type": "code",
+        "token_access_type": "offline"
+    })
+    json_response(handler, {"ok": True, "url": url})
+
+
+def api_dropbox_exchange(handler):
+    data = parse_body(handler)
+    code = str(data.get("code") or "").strip()
+    if not code:
+        raise ValueError("Dropbox 인증코드를 입력하세요.")
+    app_key = os.environ.get("DROPBOX_APP_KEY", "").strip()
+    app_secret = os.environ.get("DROPBOX_APP_SECRET", "").strip()
+    if not app_key or not app_secret:
+        raise ValueError("Render에 DROPBOX_APP_KEY와 DROPBOX_APP_SECRET을 먼저 설정하세요.")
+    form = urllib.parse.urlencode({
+        "code": code, "grant_type": "authorization_code",
+        "client_id": app_key, "client_secret": app_secret
+    }).encode("utf-8")
+    req = urllib.request.Request(
+        "https://api.dropboxapi.com/oauth2/token", data=form,
+        headers={"Content-Type": "application/x-www-form-urlencoded"}, method="POST"
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=30) as response:
+            result = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        # Do not return Dropbox response body: it can contain diagnostic details.
+        raise ValueError("인증코드가 만료되었거나 이미 사용되었습니다. Dropbox에서 새 코드를 받아 다시 시도하세요.") from exc
+    refresh_token = str(result.get("refresh_token") or "")
+    if not refresh_token:
+        raise ValueError("갱신 토큰을 받지 못했습니다. Dropbox에서 offline access 인증을 다시 진행하세요.")
+    # This is returned once to the authenticated user for manual entry in Render.
+    # It is never written to the database or application logs.
+    json_response(handler, {"ok": True, "refresh_token": refresh_token})
+
+
+def dropbox_setup_page():
+    return """<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>머니북 Dropbox 연결</title><style>body{font-family:system-ui,sans-serif;max-width:680px;margin:24px auto;padding:0 16px;line-height:1.6;color:#172033}input,button,textarea{box-sizing:border-box;width:100%;padding:12px;margin:6px 0 12px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}button{background:#172033;color:white;cursor:pointer}pre,textarea{overflow-wrap:anywhere;white-space:pre-wrap}small{color:#475569}.warn{background:#fff7ed;padding:12px;border-radius:8px}.hidden{display:none}</style></head><body><h1>머니북 Dropbox 연결 준비</h1><p>이 페이지는 로그인한 머니북 사용자만 이용할 수 있습니다. 인증코드와 갱신 토큰을 채팅에 보내지 마세요.</p><hr><h2>백업 상태</h2><p id="backupStatus" role="status">상태 확인 중…</p><button id="refreshStatus">상태 새로고침</button><hr><h2>1. Dropbox 인증 및 코드 교환</h2><button id="authorize">인증 링크 준비</button><p>아래 링크를 눌러 Dropbox 승인을 완료한 뒤 표시된 인증코드를 붙여 넣으세요.</p><p><a id="authorizeLink" class="hidden" target="_blank" rel="noopener noreferrer">Dropbox 인증 열기</a></p><label for="code">Dropbox 인증코드</label><input id="code" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="인증코드를 여기에 붙여넣기"><button id="exchange">갱신 토큰 받기</button><p id="message" role="status"></p><div id="tokenBox" class="hidden"><label for="token">갱신 토큰 (Render에만 입력)</label><textarea id="token" rows="4" readonly></textarea><button id="copyToken">토큰 복사</button><p class="warn">토큰은 이 화면에서만 표시됩니다. Render 환경 변수 <b>DROPBOX_REFRESH_TOKEN</b>에 붙여 넣고 저장하세요. 채팅이나 GitHub에는 올리지 마세요.</p></div><hr><h2>2. 백업 암호화 키 생성</h2><p>이 키는 백업 파일을 암호화합니다. 잃어버리면 백업을 복호화할 수 없으므로 비밀번호 관리자 등 안전한 곳에도 보관하세요.</p><button id="makeKey">암호화 키 생성</button><textarea id="key" rows="3" readonly placeholder="버튼을 눌러 키를 생성하세요"></textarea><button id="copyKey">암호화 키 복사</button><p class="warn">Render 환경 변수 <b>BACKUP_ENCRYPTION_KEY</b>에 입력하세요. 이 키도 채팅이나 GitHub에 올리지 마세요.</p><p><small>필요한 Render 환경 변수: DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, BACKUP_ENCRYPTION_KEY. DROPBOX_BACKUP_PATH는 선택사항이며 비우면 Dropbox 앱 폴더 최상위에 저장합니다.</small></p><script>const $=id=>document.getElementById(id);const statusNames={idle:"아직 백업 대기 내역 없음",pending:"백업 예약됨",uploading:"백업 업로드 중",success:"최근 백업 성공",failed:"백업 실패 — 다음 접속 때 재시도",waiting_config:"Dropbox 설정 필요"};async function refreshStatus(){try{const r=await fetch("/api/backup/status",{cache:"no-store"});const d=await r.json();if(!r.ok)throw new Error(d.error||"상태를 확인할 수 없습니다.");let s="Dropbox 설정: "+(d.configured?"완료":"미완료")+" · "+(statusNames[d.status]||d.status);if(d.last_success_at)s+=" · 최근 성공: "+new Date(d.last_success_at*1000).toLocaleString();if(d.last_file)s+=" · 파일: "+d.last_file;if(d.last_size_bytes!=null)s+=" · 크기: "+Number(d.last_size_bytes).toLocaleString()+"바이트";if(d.last_error)s+=" · 안내: "+d.last_error;$("backupStatus").textContent=s}catch(e){$("backupStatus").textContent=e.message||"상태를 확인할 수 없습니다."}}$("refreshStatus").onclick=refreshStatus;refreshStatus();$("authorize").onclick=async()=>{try{const r=await fetch("/api/dropbox/authorize-url");const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||"인증 주소를 만들 수 없습니다.");$("authorizeLink").href=d.url;$("authorizeLink").classList.remove("hidden");$("message").textContent="링크가 준비됐어요. 위의 Dropbox 인증 열기를 눌러주세요."}catch(e){$("message").textContent=e.message||"인증 주소를 만들 수 없습니다."}};$("exchange").onclick=async()=>{const code=$("code").value.trim();if(!code){$("message").textContent="인증코드를 입력하세요.";return} $("exchange").disabled=true;$("message").textContent="인증 중…";$("tokenBox").classList.add("hidden");try{const r=await fetch("/api/dropbox/exchange",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||"인증에 실패했습니다.");$("token").value=d.refresh_token;$("tokenBox").classList.remove("hidden");$("code").value="";$("message").textContent="완료! 토큰을 Render에 입력하세요."}catch(e){$("message").textContent=e.message||"인증에 실패했습니다."}finally{$("exchange").disabled=false}};$("copyToken").onclick=async()=>{try{await navigator.clipboard.writeText($("token").value);$("message").textContent="토큰을 복사했어요. Render에만 붙여 넣으세요."}catch(e){$("token").focus();$("token").select();$("message").textContent="토큰을 선택했어요. 복사해서 Render에 붙여 넣으세요."}};$("makeKey").onclick=()=>{const bytes=new Uint8Array(32);crypto.getRandomValues(bytes);let s="";for(const b of bytes)s+=String.fromCharCode(b);$("key").value=btoa(s).replace(/\+/g,"-").replace(/\//g,"_")};$("copyKey").onclick=async()=>{if(!$("key").value){$("message").textContent="먼저 암호화 키를 생성하세요.";return}try{await navigator.clipboard.writeText($("key").value);$("message").textContent="암호화 키를 복사했어요. Render와 안전한 보관 장소에 저장하세요."}catch(e){$("key").focus();$("key").select();$("message").textContent="키를 선택했어요. 복사해서 안전하게 보관하세요."}};</script></body></html>"""
 
 
 AUTH_COOKIE='moneybook_session'
@@ -808,7 +1093,17 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == '/api/auth/status': api_auth_status(self); return
             if self._auth_required() and not _valid_session(self): json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED); return
-            if path == '/api/bootstrap':
+            _maybe_schedule_due_backup()
+            if path == '/dropbox-setup':
+                if not _valid_session(self):
+                    text_response(self, '로그인 후 이용하세요.', status=HTTPStatus.UNAUTHORIZED)
+                else:
+                    text_response(self, dropbox_setup_page())
+            elif path == '/api/backup/status':
+                api_backup_status(self)
+            elif path == '/api/dropbox/authorize-url':
+                api_dropbox_authorize_url(self)
+            elif path == '/api/bootstrap':
                 api_bootstrap(self)
             elif path == '/api/transactions':
                 api_transactions(self)
@@ -850,7 +1145,10 @@ class Handler(BaseHTTPRequestHandler):
                 else: json_response(self, {'ok':False,'error':'Not found'}, HTTPStatus.NOT_FOUND)
                 return
             if self._auth_required() and not _valid_session(self): json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED); return
-            if path == '/api/transactions':
+            _maybe_schedule_due_backup()
+            if path == '/api/dropbox/exchange':
+                api_dropbox_exchange(self)
+            elif path == '/api/transactions':
                 api_add_transaction(self)
             elif path == '/api/transactions/import':
                 api_import_transactions(self)
@@ -884,6 +1182,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         try:
             path = urlparse(self.path).path
+            if self._auth_required() and not _valid_session(self):
+                json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED)
+                return
+            _maybe_schedule_due_backup()
             if re.fullmatch(r'/api/notes/\d+', path):
                 api_note_delete(self, int(path.rsplit('/', 1)[1]))
             elif re.fullmatch(r'/api/transactions/\d+', path):
@@ -896,6 +1198,7 @@ class Handler(BaseHTTPRequestHandler):
 
 def main():
     ensure_schema()
+    _maybe_schedule_due_backup()
     print('머니북 모바일 v0.6.5 (Supabase-ready)')
     print(f'DB: {DB_PATH}')
     print(f'Open: http://127.0.0.1:{PORT}')
