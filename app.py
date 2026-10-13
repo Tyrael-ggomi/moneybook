@@ -417,6 +417,7 @@ def api_backup_status(handler):
     state = _backup_state() or {}
     json_response(handler, {
         "configured": _dropbox_configured(),
+        "encryption_key_configured": bool(os.environ.get("BACKUP_ENCRYPTION_KEY", "").strip()),
         "status": state.get("status", "idle"),
         "last_change_at": state.get("last_change_at"),
         "last_attempt_at": state.get("last_attempt_at"),
@@ -472,7 +473,108 @@ def api_dropbox_exchange(handler):
 
 
 def dropbox_setup_page():
-    return """<!doctype html><html lang="ko"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="robots" content="noindex,nofollow"><title>머니북 Dropbox 연결</title><style>body{font-family:system-ui,sans-serif;max-width:680px;margin:24px auto;padding:0 16px;line-height:1.6;color:#172033}input,button,textarea{box-sizing:border-box;width:100%;padding:12px;margin:6px 0 12px;border:1px solid #cbd5e1;border-radius:8px;font:inherit}button{background:#172033;color:white;cursor:pointer}pre,textarea{overflow-wrap:anywhere;white-space:pre-wrap}small{color:#475569}.warn{background:#fff7ed;padding:12px;border-radius:8px}.hidden{display:none}</style></head><body><h1>머니북 Dropbox 연결 준비</h1><p>이 페이지는 로그인한 머니북 사용자만 이용할 수 있습니다. 인증코드와 갱신 토큰을 채팅에 보내지 마세요.</p><hr><h2>백업 상태</h2><p id="backupStatus" role="status">상태 확인 중…</p><button id="refreshStatus">상태 새로고침</button><hr><h2>1. Dropbox 인증 및 코드 교환</h2><button id="authorize">인증 링크 준비</button><p>아래 링크를 눌러 Dropbox 승인을 완료한 뒤 표시된 인증코드를 붙여 넣으세요.</p><p><a id="authorizeLink" class="hidden" target="_blank" rel="noopener noreferrer">Dropbox 인증 열기</a></p><label for="code">Dropbox 인증코드</label><input id="code" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="인증코드를 여기에 붙여넣기"><button id="exchange">갱신 토큰 받기</button><p id="message" role="status"></p><div id="tokenBox" class="hidden"><label for="token">갱신 토큰 (Render에만 입력)</label><textarea id="token" rows="4" readonly></textarea><button id="copyToken">토큰 복사</button><p class="warn">토큰은 이 화면에서만 표시됩니다. Render 환경 변수 <b>DROPBOX_REFRESH_TOKEN</b>에 붙여 넣고 저장하세요. 채팅이나 GitHub에는 올리지 마세요.</p></div><hr><h2>2. 백업 암호화 키 생성</h2><p>이 키는 백업 파일을 암호화합니다. 잃어버리면 백업을 복호화할 수 없으므로 비밀번호 관리자 등 안전한 곳에도 보관하세요.</p><button id="makeKey">암호화 키 생성</button><textarea id="key" rows="3" readonly placeholder="버튼을 눌러 키를 생성하세요"></textarea><button id="copyKey">암호화 키 복사</button><p class="warn">Render 환경 변수 <b>BACKUP_ENCRYPTION_KEY</b>에 입력하세요. 이 키도 채팅이나 GitHub에 올리지 마세요.</p><p><small>필요한 Render 환경 변수: DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, BACKUP_ENCRYPTION_KEY. DROPBOX_BACKUP_PATH는 선택사항이며 비우면 Dropbox 앱 폴더 최상위에 저장합니다.</small></p><script>const $=id=>document.getElementById(id);const statusNames={idle:"아직 백업 대기 내역 없음",pending:"백업 예약됨",uploading:"백업 업로드 중",success:"최근 백업 성공",failed:"백업 실패 — 다음 접속 때 재시도",waiting_config:"Dropbox 설정 필요"};async function refreshStatus(){try{const r=await fetch("/api/backup/status",{cache:"no-store"});const d=await r.json();if(!r.ok)throw new Error(d.error||"상태를 확인할 수 없습니다.");let s="Dropbox 설정: "+(d.configured?"완료":"미완료")+" · "+(statusNames[d.status]||d.status);if(d.last_success_at)s+=" · 최근 성공: "+new Date(d.last_success_at*1000).toLocaleString();if(d.last_file)s+=" · 파일: "+d.last_file;if(d.last_size_bytes!=null)s+=" · 크기: "+Number(d.last_size_bytes).toLocaleString()+"바이트";if(d.last_error)s+=" · 안내: "+d.last_error;$("backupStatus").textContent=s}catch(e){$("backupStatus").textContent=e.message||"상태를 확인할 수 없습니다."}}$("refreshStatus").onclick=refreshStatus;refreshStatus();$("authorize").onclick=async()=>{try{const r=await fetch("/api/dropbox/authorize-url");const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||"인증 주소를 만들 수 없습니다.");$("authorizeLink").href=d.url;$("authorizeLink").classList.remove("hidden");$("message").textContent="링크가 준비됐어요. 위의 Dropbox 인증 열기를 눌러주세요."}catch(e){$("message").textContent=e.message||"인증 주소를 만들 수 없습니다."}};$("exchange").onclick=async()=>{const code=$("code").value.trim();if(!code){$("message").textContent="인증코드를 입력하세요.";return} $("exchange").disabled=true;$("message").textContent="인증 중…";$("tokenBox").classList.add("hidden");try{const r=await fetch("/api/dropbox/exchange",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||"인증에 실패했습니다.");$("token").value=d.refresh_token;$("tokenBox").classList.remove("hidden");$("code").value="";$("message").textContent="완료! 토큰을 Render에 입력하세요."}catch(e){$("message").textContent=e.message||"인증에 실패했습니다."}finally{$("exchange").disabled=false}};$("copyToken").onclick=async()=>{try{await navigator.clipboard.writeText($("token").value);$("message").textContent="토큰을 복사했어요. Render에만 붙여 넣으세요."}catch(e){$("token").focus();$("token").select();$("message").textContent="토큰을 선택했어요. 복사해서 Render에 붙여 넣으세요."}};$("makeKey").onclick=()=>{const bytes=new Uint8Array(32);crypto.getRandomValues(bytes);let s="";for(const b of bytes)s+=String.fromCharCode(b);$("key").value=btoa(s).replace(/\+/g,"-").replace(/\//g,"_")};$("copyKey").onclick=async()=>{if(!$("key").value){$("message").textContent="먼저 암호화 키를 생성하세요.";return}try{await navigator.clipboard.writeText($("key").value);$("message").textContent="암호화 키를 복사했어요. Render와 안전한 보관 장소에 저장하세요."}catch(e){$("key").focus();$("key").select();$("message").textContent="키를 선택했어요. 복사해서 안전하게 보관하세요."}};</script></body></html>"""
+    return """<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow">
+<title>머니북 Dropbox 연결</title>
+<style>
+*{box-sizing:border-box}body{font-family:system-ui,sans-serif;max-width:680px;margin:24px auto;padding:0 16px;line-height:1.6;color:#172033;background:#f8fafc}
+main{background:white;border:1px solid #e2e8f0;border-radius:16px;padding:22px}
+input,button,textarea{box-sizing:border-box;width:100%;padding:12px;margin:6px 0 12px;border:1px solid #cbd5e1;border-radius:10px;font:inherit}
+button{background:#172033;color:white;cursor:pointer;font-weight:700}button:disabled{opacity:.45;cursor:not-allowed}
+pre,textarea{overflow-wrap:anywhere;white-space:pre-wrap}small,.muted{color:#475569}.warn{background:#fff7ed;padding:12px;border-radius:8px}.ok{background:#f0fdf4;padding:12px;border-radius:8px}.hidden{display:none!important}
+a{color:#1d4ed8}.topLink{display:inline-block;margin-bottom:12px}.status{overflow-wrap:anywhere;background:#f1f5f9;padding:12px;border-radius:10px}
+</style>
+</head>
+<body>
+<main>
+<a class="topLink" href="/">← 머니북으로 돌아가기</a>
+<h1>머니북 Dropbox 연결 준비</h1>
+<p>이 페이지는 로그인한 머니북 사용자만 이용할 수 있습니다. 인증코드와 갱신 토큰을 채팅에 보내지 마세요.</p>
+<hr>
+<h2>백업 상태</h2><p id="backupStatus" class="status" role="status">상태 확인 중…</p>
+<button id="refreshStatus" type="button">상태 새로고침</button>
+<hr>
+<h2>1. Dropbox 인증 및 코드 교환</h2>
+<button id="authorize" type="button">인증 링크 준비</button>
+<p>아래 링크를 눌러 Dropbox 승인을 완료한 뒤 표시된 인증코드를 붙여 넣으세요.</p>
+<p><a id="authorizeLink" class="hidden" target="_blank" rel="noopener noreferrer">Dropbox 인증 열기</a></p>
+<label for="code">Dropbox 인증코드</label><input id="code" autocomplete="off" autocapitalize="off" spellcheck="false" placeholder="인증코드를 여기에 붙여넣기">
+<button id="exchange" type="button">갱신 토큰 받기</button><p id="message" role="status"></p>
+<div id="tokenBox" class="hidden"><label for="token">갱신 토큰 (Render에만 입력)</label><textarea id="token" rows="4" readonly></textarea><button id="copyToken" type="button">토큰 복사</button><p class="warn">토큰은 이 화면에서만 표시됩니다. Render 환경 변수 <b>DROPBOX_REFRESH_TOKEN</b>에 붙여 넣고 저장하세요. 채팅이나 GitHub에는 올리지 마세요.</p></div>
+<hr>
+<h2>2. 백업 암호화 키</h2>
+<p>이 키는 백업 파일을 암호화합니다. 잃어버리면 백업을 복호화할 수 없으므로 비밀번호 관리자 등 안전한 곳에도 보관하세요.</p>
+<div id="keyConfiguredBox" class="ok hidden">암호화 키가 이미 Render에 설정되어 있습니다. 안전을 위해 새 키 생성을 잠갔습니다. 기존 백업을 계속 열 수 있도록 이 키를 변경하거나 다시 생성하지 마세요.</div>
+<div id="keyNotConfiguredBox" class="warn hidden">암호화 키가 아직 Render에 설정되지 않은 것으로 확인됩니다. 키를 한 번 생성한 뒤 Render의 <b>BACKUP_ENCRYPTION_KEY</b>에 저장하고, 별도의 안전한 장소에도 보관하세요.</div>
+<button id="makeKey" type="button" disabled>암호화 키 생성</button>
+<textarea id="key" rows="3" readonly placeholder="키 설정 상태를 확인하는 중…"></textarea>
+<button id="copyKey" type="button" disabled>암호화 키 복사</button>
+<p class="warn">기존 키를 새 키로 바꾸면 예전 백업을 복호화할 수 없게 됩니다. 키가 이미 설정되어 있다면 이 페이지에서 새 키를 만들지 마세요.</p>
+<p><small>필요한 Render 환경 변수: DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, BACKUP_ENCRYPTION_KEY. DROPBOX_BACKUP_PATH는 선택사항이며 비우면 Dropbox 앱 폴더 최상위에 저장합니다.</small></p>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const statusNames={idle:"아직 백업 대기 내역 없음",pending:"백업 예약됨",uploading:"백업 업로드 중",success:"최근 백업 성공",failed:"백업 실패 — 다음 접속 때 재시도",waiting_config:"Dropbox 설정 필요"};
+let keyGenerated=false;
+async function refreshStatus(){
+  try{
+    const r=await fetch("/api/backup/status",{cache:"no-store"});
+    const d=await r.json();
+    if(!r.ok)throw new Error(d.error||"상태를 확인할 수 없습니다.");
+    let s="Dropbox 설정: "+(d.configured?"완료":"미완료")+" · "+(statusNames[d.status]||d.status);
+    if(d.last_success_at)s+=" · 최근 성공: "+new Date(d.last_success_at*1000).toLocaleString();
+    if(d.last_file)s+=" · 파일: "+d.last_file;
+    if(d.last_size_bytes!=null)s+=" · 크기: "+Number(d.last_size_bytes).toLocaleString()+"바이트";
+    if(d.last_error)s+=" · 안내: "+d.last_error;
+    $("backupStatus").textContent=s;
+    const hasKey=!!d.encryption_key_configured;
+    $("keyConfiguredBox").classList.toggle("hidden",!hasKey);
+    $("keyNotConfiguredBox").classList.toggle("hidden",hasKey);
+    $("makeKey").disabled=hasKey||keyGenerated;
+    $("copyKey").disabled=!$("key").value;
+    $("makeKey").textContent=hasKey?"암호화 키 설정 완료":keyGenerated?"키 생성 완료":"암호화 키 생성";
+    if(hasKey){$("key").value="";$("key").placeholder="키는 보안상 다시 표시하지 않습니다.";}
+    else if(!keyGenerated){$("key").placeholder="키 생성 후 이곳에 표시됩니다.";}
+  }catch(e){$("backupStatus").textContent=e.message||"상태를 확인할 수 없습니다.";$("makeKey").disabled=true}
+}
+$("refreshStatus").onclick=refreshStatus;
+refreshStatus();
+$("authorize").onclick=async()=>{
+  try{const r=await fetch("/api/dropbox/authorize-url");const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||"인증 주소를 만들 수 없습니다.");$("authorizeLink").href=d.url;$("authorizeLink").classList.remove("hidden");$("message").textContent="링크가 준비됐어요. 위의 Dropbox 인증 열기를 눌러주세요."}
+  catch(e){$("message").textContent=e.message||"인증 주소를 만들 수 없습니다."}
+};
+$("exchange").onclick=async()=>{
+  const code=$("code").value.trim();if(!code){$("message").textContent="인증코드를 입력하세요.";return}
+  $("exchange").disabled=true;$("message").textContent="인증 중…";$("tokenBox").classList.add("hidden");
+  try{const r=await fetch("/api/dropbox/exchange",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({code})});const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||"인증에 실패했습니다.");$("token").value=d.refresh_token;$("tokenBox").classList.remove("hidden");$("code").value="";$("message").textContent="완료! 토큰을 Render에 입력하세요."}
+  catch(e){$("message").textContent=e.message||"인증에 실패했습니다."}
+  finally{$("exchange").disabled=false}
+};
+$("copyToken").onclick=async()=>{
+  try{await navigator.clipboard.writeText($("token").value);$("message").textContent="토큰을 복사했어요. Render에만 붙여 넣으세요."}
+  catch(e){$("token").focus();$("token").select();$("message").textContent="토큰을 선택했어요. 복사해서 Render에 붙여 넣으세요."}
+};
+$("makeKey").onclick=()=>{
+  if($("makeKey").disabled||keyGenerated)return;
+  if(!confirm("새 암호화 키를 생성할까요? Render에 기존 키가 이미 있다면 생성하면 안 됩니다."))return;
+  const bytes=new Uint8Array(32);crypto.getRandomValues(bytes);let s="";
+  for(const b of bytes)s+=String.fromCharCode(b);
+  $("key").value=btoa(s).replace(/\+/g,"-").replace(/\//g,"_");
+  keyGenerated=true;$("makeKey").disabled=true;$("copyKey").disabled=false;$("makeKey").textContent="키 생성 완료";
+  $("message").textContent="새 키를 Render에 저장하고 안전한 장소에도 보관하세요. 이 페이지에서 다시 생성할 수 없습니다.";
+};
+$("copyKey").onclick=async()=>{
+  if(!$("key").value){$("message").textContent="먼저 암호화 키를 생성하세요.";return}
+  try{await navigator.clipboard.writeText($("key").value);$("message").textContent="암호화 키를 복사했어요. Render와 안전한 보관 장소에 저장하세요."}
+  catch(e){$("key").focus();$("key").select();$("message").textContent="키를 선택했어요. 복사해서 안전하게 보관하세요."}
+};
+</script>
+</body></html>"""
+
 
 
 AUTH_COOKIE='moneybook_session'
