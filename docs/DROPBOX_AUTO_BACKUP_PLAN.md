@@ -1,6 +1,6 @@
 # Dropbox 자동 백업 설계 메모
 
-상태: 자동 백업 구현 완료. 설정 화면 통합 및 암호화 키 보호 개선은 기능 브랜치에서 검토 중.
+상태: 자동 백업 및 설정 화면 통합 완료. 백업 목록/복원 UI는 기능 브랜치에서 검토 중.
 
 ## 목표 동작
 
@@ -48,13 +48,15 @@ Dropbox는 앱 폴더 접근만 허용하도록 설정한다. 토큰은 권한 �
 
 ## 사용자 확인이 필요한 작업
 
-Dropbox 앱 콘솔에서 앱을 만들고, App folder + `files.content.write` 권한을 설정한다. 먼저 `DROPBOX_APP_KEY`와 `DROPBOX_APP_SECRET`을 Render 환경 변수에 입력해 배포한 뒤, 로그인한 상태에서 `/dropbox-setup`을 열어 인증코드를 갱신 토큰으로 교환한다. 토큰은 해당 페이지에 한 번 표시되며, 사용자가 `DROPBOX_REFRESH_TOKEN` 환경 변수에 직접 입력한다. 같은 페이지에서 백업 암호화 키도 생성해 `BACKUP_ENCRYPTION_KEY`에 입력한다. 비밀 값은 채팅이나 GitHub에 붙여 넣지 않는다.
+Dropbox 앱 콘솔에서 앱을 만들고, App folder + `files.content.write`, `files.content.read`, `files.metadata.read` 권한을 설정한다. 백업 목록/복원 기능은 `files.metadata.read`가 필요하므로 권한을 추가한 경우 `/dropbox-setup`에서 Dropbox를 다시 인증해 새 refresh token을 Render에 등록한다. 먼저 `DROPBOX_APP_KEY`와 `DROPBOX_APP_SECRET`을 Render 환경 변수에 입력해 배포한 뒤, 로그인한 상태에서 `/dropbox-setup`을 열어 인증코드를 갱신 토큰으로 교환한다. 토큰은 해당 페이지에 한 번 표시되며, 사용자가 `DROPBOX_REFRESH_TOKEN` 환경 변수에 직접 입력한다. 같은 페이지에서 백업 암호화 키도 생성해 `BACKUP_ENCRYPTION_KEY`에 입력한다. 비밀 값은 채팅이나 GitHub에 붙여 넣지 않는다.
 
 ## 복원 방법
 
-- `restore_backup.py`는 이미 Moneybook 테이블이 준비된 대상 DB에 백업 데이터를 복원한다.
-- 복원은 현재 데이터 전체를 교체하므로 `--replace` 옵션과 `RESTORE` 확인 문구가 모두 필요하다. 운영 DB에서 실행하기 전에 반드시 별도 DB 또는 로컬 사본에서 검증한다.
-- 예: `BACKUP_ENCRYPTION_KEY`와 대상 `DATABASE_URL`을 환경 변수로 설정한 뒤 `python restore_backup.py moneybook-backup-....json.gz.fernet --replace` 실행.
+- 설정 > 백업 및 복원 > 백업 목록 및 복원에서 Dropbox 백업을 선택할 수 있다.
+- 복원 전에 현재 운영 데이터 전체를 `moneybook-pre-restore-...` 파일로 Dropbox에 암호화 업로드한다. 이 안전 백업 업로드가 실패하면 복원은 시작하지 않는다.
+- 복원은 `RESTORE` 입력과 추가 확인을 요구한다. 카드/분류/지출/메모/설정뿐 아니라 로그인 비밀번호 해시와 패스키 정보도 선택한 백업 시점으로 돌아갈 수 있다.
+- 복원 후에는 다시 로그인해 데이터를 확인한다. 복원된 데이터는 약 10분 후 새 자동 백업이 예약된다.
+- `restore_backup.py`는 비상용 수동 복구 수단으로 유지한다. 운영 DB에서 실행하기 전에 별도 DB 또는 로컬 사본에서 검증.
 - 백업은 카드/분류/거래/설정/자동분류/메모와 로그인 비밀번호 해시·패스키 공개 검증 정보를 포함한다. 세션과 일회성 인증 챌린지는 복원하지 않는다.
 
 ## 첫 구현 참고

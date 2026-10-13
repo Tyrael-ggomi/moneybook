@@ -30,5 +30,15 @@ jobs:
           Path("/tmp/dropbox-setup.js").write_text(script, encoding="utf-8")
           PY
           node --check /tmp/dropbox-setup.js
+      - name: Check backup restore page JavaScript syntax
+        run: |
+          python - <<'PY'
+          import app
+          from pathlib import Path
+          html = app.backup_restore_page()
+          script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+          Path("/tmp/backup-restore.js").write_text(script, encoding="utf-8")
+          PY
+          node --check /tmp/backup-restore.js
       - name: Run backup restore tests
         run: python -m unittest discover -s tests

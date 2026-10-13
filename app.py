@@ -15,6 +15,7 @@ import gzip
 import urllib.parse
 import urllib.request
 import urllib.error
+import tempfile
 
 try:
     from cryptography.fernet import Fernet
@@ -413,6 +414,137 @@ def _maybe_schedule_due_backup():
     _schedule_backup_timer(max(0, changed_at + BACKUP_QUIET_SECONDS - now))
 
 
+
+def _list_dropbox_backups():
+    """Return only known encrypted Moneybook backup files from the configured folder."""
+    access_token = _dropbox_access_token()
+    folder = os.environ.get("DROPBOX_BACKUP_PATH", "").strip().rstrip("/")
+    payload = {"path": folder, "recursive": False, "include_deleted": False, "limit": 2000}
+    result = _dropbox_json_request("https://api.dropboxapi.com/2/files/list_folder", payload, access_token)
+    entries = list(result.get("entries") or [])
+    while result.get("has_more") and result.get("cursor"):
+        result = _dropbox_json_request(
+            "https://api.dropboxapi.com/2/files/list_folder/continue",
+            {"cursor": result["cursor"]}, access_token
+        )
+        entries.extend(result.get("entries") or [])
+    backups = []
+    for item in entries:
+        name = str(item.get("name") or "")
+        is_regular_backup = name.startswith("moneybook-backup-")
+        is_safety_backup = name.startswith("moneybook-pre-restore-")
+        if item.get(".tag") != "file" or not (is_regular_backup or is_safety_backup) or not name.endswith(".json.gz.fernet"):
+            continue
+        path_lower = str(item.get("path_lower") or "")
+        if not path_lower:
+            continue
+        backups.append({
+            "name": name,
+            "path": path_lower,
+            "modified": item.get("server_modified"),
+            "size": int(item.get("size") or 0),
+            "safety": is_safety_backup
+        })
+    backups.sort(key=lambda item: str(item.get("modified") or ""), reverse=True)
+    return backups
+
+
+def _download_dropbox_file(path_lower):
+    access_token = _dropbox_access_token()
+    req = urllib.request.Request(
+        "https://content.dropboxapi.com/2/files/download",
+        data=b"",
+        headers={
+            "Authorization": "Bearer " + access_token,
+            "Dropbox-API-Arg": json.dumps({"path": path_lower}, separators=(",", ":"))
+        },
+        method="POST"
+    )
+    with urllib.request.urlopen(req, timeout=90) as response:
+        return response.read()
+
+
+def _create_encrypted_backup():
+    if not _dropbox_configured() or Fernet is None:
+        raise RuntimeError("Dropbox 및 암호화 키 설정을 확인하세요.")
+    key = os.environ["BACKUP_ENCRYPTION_KEY"].strip().encode("ascii")
+    cipher = Fernet(key)
+    payload = {"format": "moneybook-backup-v1", "created_at": datetime.utcnow().isoformat() + "Z", "tables": {}}
+    with db() as conn:
+        for table in BACKUP_TABLES:
+            payload["tables"][table] = [dict(row) for row in conn.execute(f"SELECT * FROM {table}").fetchall()]
+    raw = json.dumps(payload, ensure_ascii=False, default=_json_default, separators=(",", ":")).encode("utf-8")
+    encrypted = cipher.encrypt(gzip.compress(raw, compresslevel=6))
+    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    return f"moneybook-backup-{stamp}.json.gz.fernet", encrypted
+
+
+def api_backup_list(handler):
+    if not _dropbox_configured():
+        json_response(handler, {"ok": False, "error": "Dropbox 및 암호화 키 설정을 먼저 완료하세요."}, HTTPStatus.SERVICE_UNAVAILABLE)
+        return
+    try:
+        json_response(handler, {"ok": True, "backups": _list_dropbox_backups()})
+    except Exception as exc:
+        # Do not leak provider response bodies or credentials.
+        json_response(handler, {"ok": False, "error": "Dropbox 백업 목록을 불러오지 못했습니다. 앱 권한에 files.metadata.read, files.content.read가 있는지 확인하고 Dropbox 연결을 다시 인증하세요."}, HTTPStatus.BAD_GATEWAY)
+
+
+def api_backup_restore(handler):
+    data = parse_body(handler)
+    selected_path = str(data.get("path") or "").strip()
+    confirmation = str(data.get("confirmation") or "").strip()
+    if confirmation != "RESTORE":
+        json_response(handler, {"ok": False, "error": "확인 문구에 RESTORE를 입력해야 합니다."}, HTTPStatus.BAD_REQUEST)
+        return
+    if not selected_path or len(selected_path) > 1024 or not selected_path.startswith("/"):
+        json_response(handler, {"ok": False, "error": "복원할 백업을 목록에서 선택하세요."}, HTTPStatus.BAD_REQUEST)
+        return
+    if not _dropbox_configured():
+        json_response(handler, {"ok": False, "error": "Dropbox 및 암호화 키 설정을 먼저 완료하세요."}, HTTPStatus.SERVICE_UNAVAILABLE)
+        return
+    if not _backup_run_lock.acquire(blocking=False):
+        json_response(handler, {"ok": False, "error": "백업 작업이 진행 중입니다. 잠시 후 다시 시도하세요."}, HTTPStatus.CONFLICT)
+        return
+    try:
+        # Never accept arbitrary Dropbox paths: the selected file must be in the verified backup list.
+        matches = [item for item in _list_dropbox_backups() if item["path"] == selected_path]
+        if not matches:
+            json_response(handler, {"ok": False, "error": "선택한 백업을 찾을 수 없습니다. 목록을 새로고침하세요."}, HTTPStatus.NOT_FOUND)
+            return
+        encrypted = _download_dropbox_file(selected_path)
+        with tempfile.NamedTemporaryFile(prefix="moneybook-restore-", suffix=".fernet", delete=False) as temp:
+            temp.write(encrypted)
+            temp_path = Path(temp.name)
+        try:
+            import restore_backup
+            # Validate and decrypt the selected backup before touching current data.
+            restore_backup.load_payload(temp_path)
+            # Upload a fresh safety copy of the current live data first. Abort if this fails.
+            safety_name, safety_bytes = _create_encrypted_backup()
+            safety_name = safety_name.replace("moneybook-backup-", "moneybook-pre-restore-", 1)
+            safety_path = _upload_dropbox_backup(safety_name, safety_bytes)
+            counts = restore_backup.restore(temp_path)
+            now = int(time.time())
+            _set_backup_state(last_change_at=now, status="pending", last_error=None)
+            json_response(handler, {
+                "ok": True,
+                "counts": counts,
+                "safety_backup": safety_path,
+                "message": "복원이 완료되었습니다. 복원된 데이터의 새 자동 백업이 약 10분 후 예약되었습니다."
+            })
+        finally:
+            try:
+                temp_path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    except (Exception, SystemExit):
+        # Avoid returning exception details that may include provider or database internals.
+        json_response(handler, {"ok": False, "error": "복원에 실패했습니다. 백업 파일·암호화 키·연결 상태를 확인하고 현재 데이터가 정상인지 확인하세요."}, HTTPStatus.BAD_REQUEST)
+    finally:
+        _backup_run_lock.release()
+
+
 def api_backup_status(handler):
     state = _backup_state() or {}
     json_response(handler, {
@@ -472,6 +604,89 @@ def api_dropbox_exchange(handler):
     json_response(handler, {"ok": True, "refresh_token": refresh_token})
 
 
+
+def backup_restore_page():
+    return """<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="robots" content="noindex,nofollow">
+<title>머니북 백업 복원</title>
+<style>
+*{box-sizing:border-box}body{font-family:system-ui,-apple-system,sans-serif;max-width:720px;margin:24px auto;padding:0 16px;line-height:1.6;color:#172033;background:#f8fafc}
+main{background:#fff;border:1px solid #e2e8f0;border-radius:16px;padding:22px}h1{font-size:1.45rem;margin-top:0}
+.warn{background:#fff7ed;border:1px solid #fed7aa;padding:14px;border-radius:10px}.muted{color:#64748b;font-size:.92rem}
+button,select,input{font:inherit;width:100%;padding:12px;margin:6px 0 12px;border:1px solid #cbd5e1;border-radius:10px}button{background:#172033;color:white;font-weight:700;cursor:pointer}button:disabled{opacity:.5;cursor:not-allowed}.secondary{background:white;color:#172033}
+#message{white-space:pre-wrap;overflow-wrap:anywhere}.backupItem{border:1px solid #e2e8f0;border-radius:10px;padding:12px;margin:8px 0}.back{display:inline-block;margin-bottom:14px;color:#334155}
+</style>
+</head>
+<body>
+<a class="back" href="/">← 머니북으로 돌아가기</a>
+<main>
+<h1>백업 복원</h1>
+<p class="warn"><strong>주의: 복원하면 현재 머니북 데이터가 선택한 백업의 내용으로 교체됩니다.</strong><br>
+카드·분류·설정·지출·메모뿐 아니라 로그인 비밀번호와 Face ID(패스키) 등록 정보도 백업 시점으로 돌아갑니다. 먼저 현재 데이터를 Dropbox에 별도 안전 백업합니다. 안전 백업에 실패하면 복원을 진행하지 않습니다.</p>
+<label for="backupSelect"><strong>복원할 백업</strong></label>
+<select id="backupSelect"><option value="">백업 목록을 불러오는 중…</option></select>
+<div id="backupDetails" class="muted"></div>
+<button id="refreshList" class="secondary" type="button">백업 목록 새로고침</button>
+<label for="confirmText"><strong>복원을 진행하려면 RESTORE 입력</strong></label>
+<input id="confirmText" autocomplete="off" placeholder="RESTORE">
+<button id="restoreBtn" type="button" disabled>선택한 백업으로 복원</button>
+<p id="message" role="status"></p>
+<p class="muted">복원 중에는 페이지를 닫지 마세요. 완료 후 다시 로그인해야 할 수 있습니다. 복원된 데이터는 약 10분 후 자동 백업이 예약됩니다.</p>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+let backups=[];
+function fmtDate(v){if(!v)return "날짜 정보 없음";const d=new Date(v);return Number.isNaN(d.getTime())?v:d.toLocaleString("ko-KR")}
+function fmtSize(n){n=Number(n)||0;return n<1024?n+" B":(n/1024).toFixed(1)+" KB"}
+async function loadBackups(){
+  $("refreshList").disabled=true;$("restoreBtn").disabled=true;$("message").textContent="Dropbox 백업 목록을 불러오는 중…";
+  try{
+    const r=await fetch("/api/backup/list",{cache:"no-store"}),d=await r.json();
+    if(!r.ok||!d.ok)throw new Error(d.error||"백업 목록을 불러오지 못했습니다.");
+    backups=d.backups||[];const select=$("backupSelect");select.replaceChildren();
+    if(!backups.length){select.add(new Option("사용 가능한 백업이 없습니다",""));$("message").textContent="백업 파일을 찾지 못했습니다. Dropbox 연결 및 백업 상태를 확인하세요."}
+    else{
+      select.add(new Option("복원할 백업을 선택하세요",""));
+      backups.forEach((b,i)=>select.add(new Option(fmtDate(b.modified)+" · "+b.name+(b.safety?" · 복원 전 안전 백업":"")+" · "+fmtSize(b.size),String(i))));
+      $("message").textContent=backups.length+"개의 백업을 찾았습니다. 가장 최근 백업이 맨 위에 표시됩니다.";
+    }
+    updateDetails();
+  }catch(e){$("backupSelect").replaceChildren(new Option("백업 목록을 불러오지 못했습니다",""));$("message").textContent=e.message||"오류가 발생했습니다."}
+  finally{$("refreshList").disabled=false;updateButton()}
+}
+function selectedBackup(){const value=$("backupSelect").value;return value===""?null:(backups[Number(value)]||null)}
+function updateDetails(){
+ const b=selectedBackup();
+ $("backupDetails").textContent=b?"백업 날짜: "+fmtDate(b.modified)+" · 파일 크기: "+fmtSize(b.size):"";
+ updateButton();
+}
+function updateButton(){$("restoreBtn").disabled=!selectedBackup()||$("confirmText").value.trim()!=="RESTORE"}
+$("backupSelect").addEventListener("change",updateDetails);
+$("confirmText").addEventListener("input",updateButton);
+$("refreshList").addEventListener("click",loadBackups);
+$("restoreBtn").addEventListener("click",async()=>{
+ const b=selectedBackup();
+ if(!b||$("confirmText").value.trim()!=="RESTORE")return;
+ if(!confirm("선택한 백업으로 현재 머니북 데이터를 교체할까요? 현재 데이터의 안전 백업을 먼저 만들며, 로그인 정보도 백업 시점으로 돌아갑니다."))return;
+ $("restoreBtn").disabled=true;$("refreshList").disabled=true;$("message").textContent="현재 데이터 안전 백업 및 복원을 진행 중입니다. 페이지를 닫지 마세요…";
+ try{
+  const r=await fetch("/api/backup/restore",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:b.path,confirmation:"RESTORE"})});
+  const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||"복원에 실패했습니다.");
+  const counts=Object.entries(d.counts||{}).map(([k,v])=>k+": "+v+"개").join("\\n");
+  $("message").textContent="복원 완료!\\n"+(d.message||"")+"\\n안전 백업: "+d.safety_backup+"\\n\\n복원된 항목:\\n"+counts+"\\n\\n다시 로그인해 정상 작동을 확인하세요.";
+  $("confirmText").value="";$("backupSelect").value="";updateDetails();
+ }catch(e){$("message").textContent=e.message||"복원에 실패했습니다."}
+ finally{$("refreshList").disabled=false;updateButton()}
+});
+loadBackups();
+</script>
+</body></html>"""
+
+
 def dropbox_setup_page():
     return """<!doctype html>
 <html lang="ko">
@@ -515,6 +730,7 @@ a{color:#1d4ed8}.topLink{display:inline-block;margin-bottom:12px}.status{overflo
 <button id="copyKey" type="button" disabled>암호화 키 복사</button>
 <p class="warn">기존 키를 새 키로 바꾸면 예전 백업을 복호화할 수 없게 됩니다. 키가 이미 설정되어 있다면 이 페이지에서 새 키를 만들지 마세요.</p>
 <p><small>필요한 Render 환경 변수: DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, BACKUP_ENCRYPTION_KEY. DROPBOX_BACKUP_PATH는 선택사항이며 비우면 Dropbox 앱 폴더 최상위에 저장합니다.</small></p>
+<p><small>백업 목록 및 복원에는 Dropbox 앱 권한 files.metadata.read, files.content.read, files.content.write가 필요합니다. 권한을 추가했다면 이 페이지에서 Dropbox 연결을 다시 인증해 새 토큰을 Render에 등록하세요.</small></p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
@@ -1203,6 +1419,13 @@ class Handler(BaseHTTPRequestHandler):
                     text_response(self, dropbox_setup_page())
             elif path == '/api/backup/status':
                 api_backup_status(self)
+            elif path == '/api/backup/list':
+                api_backup_list(self)
+            elif path == '/backup-restore':
+                if not _valid_session(self):
+                    text_response(self, '로그인 후 이용하세요.', status=HTTPStatus.UNAUTHORIZED)
+                else:
+                    text_response(self, backup_restore_page())
             elif path == '/api/dropbox/authorize-url':
                 api_dropbox_authorize_url(self)
             elif path == '/api/bootstrap':
@@ -1248,7 +1471,9 @@ class Handler(BaseHTTPRequestHandler):
                 return
             if self._auth_required() and not _valid_session(self): json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED); return
             _maybe_schedule_due_backup()
-            if path == '/api/dropbox/exchange':
+            if path == '/api/backup/restore':
+                api_backup_restore(self)
+            elif path == '/api/dropbox/exchange':
                 api_dropbox_exchange(self)
             elif path == '/api/transactions':
                 api_add_transaction(self)
