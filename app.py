@@ -536,9 +536,9 @@ def api_backup_restore(handler):
                 temp_path.unlink(missing_ok=True)
             except OSError:
                 pass
-    except Exception:
+    except (Exception, SystemExit):
         # Avoid returning exception details that may include provider or database internals.
-        json_response(handler, {"ok": False, "error": "복원에 실패했습니다. 현재 데이터는 복원 전에 별도 백업을 시도했으며, 백업 파일·암호화 키·연결 상태를 확인하세요."}, HTTPStatus.BAD_REQUEST)
+        json_response(handler, {"ok": False, "error": "복원에 실패했습니다. 백업 파일·암호화 키·연결 상태를 확인하고 현재 데이터가 정상인지 확인하세요."}, HTTPStatus.BAD_REQUEST)
     finally:
         _backup_run_lock.release()
 
