@@ -518,7 +518,6 @@ def api_backup_restore(handler):
             # Validate and decrypt the selected backup before touching current data.
             restore_backup.load_payload(temp_path)
             # Upload a fresh safety copy of the current live data first. Abort if this fails.
-            stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
             safety_name, safety_bytes = _create_encrypted_backup()
             safety_name = safety_name.replace("moneybook-backup-", "moneybook-pre-restore-", 1)
             safety_path = _upload_dropbox_backup(safety_name, safety_bytes)
@@ -656,17 +655,18 @@ async function loadBackups(){
   }catch(e){$("backupSelect").replaceChildren(new Option("백업 목록을 불러오지 못했습니다",""));$("message").textContent=e.message||"오류가 발생했습니다."}
   finally{$("refreshList").disabled=false;updateButton()}
 }
+function selectedBackup(){const value=$("backupSelect").value;return value===""?null:(backups[Number(value)]||null)}
 function updateDetails(){
- const b=backups[Number($("backupSelect").value)];
+ const b=selectedBackup();
  $("backupDetails").textContent=b?"백업 날짜: "+fmtDate(b.modified)+" · 파일 크기: "+fmtSize(b.size):"";
  updateButton();
 }
-function updateButton(){$("restoreBtn").disabled=!backups[Number($("backupSelect").value)]||$("confirmText").value.trim()!=="RESTORE"}
+function updateButton(){$("restoreBtn").disabled=!selectedBackup()||$("confirmText").value.trim()!=="RESTORE"}
 $("backupSelect").addEventListener("change",updateDetails);
 $("confirmText").addEventListener("input",updateButton);
 $("refreshList").addEventListener("click",loadBackups);
 $("restoreBtn").addEventListener("click",async()=>{
- const b=backups[Number($("backupSelect").value)];
+ const b=selectedBackup();
  if(!b||$("confirmText").value.trim()!=="RESTORE")return;
  if(!confirm("선택한 백업으로 현재 머니북 데이터를 교체할까요? 현재 데이터의 안전 백업을 먼저 만들며, 로그인 정보도 백업 시점으로 돌아갑니다."))return;
  $("restoreBtn").disabled=true;$("refreshList").disabled=true;$("message").textContent="현재 데이터 안전 백업 및 복원을 진행 중입니다. 페이지를 닫지 마세요…";
