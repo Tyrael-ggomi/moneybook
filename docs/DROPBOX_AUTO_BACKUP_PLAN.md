@@ -48,7 +48,7 @@ Dropbox는 앱 폴더 접근만 허용하도록 설정한다. 토큰은 권한 �
 
 ## 사용자 확인이 필요한 작업
 
-Dropbox 앱 콘솔에서 앱을 만들고, App folder + `files.content.write` 권한을 설정한다. 먼저 `DROPBOX_APP_KEY`와 `DROPBOX_APP_SECRET`을 Render 환경 변수에 입력해 배포한 뒤, 로그인한 상태에서 `/dropbox-setup`을 열어 인증코드를 갱신 토큰으로 교환한다. 토큰은 해당 페이지에 한 번 표시되며, 사용자가 `DROPBOX_REFRESH_TOKEN` 환경 변수에 직접 입력한다. 같은 페이지에서 백업 암호화 키도 생성해 `BACKUP_ENCRYPTION_KEY`에 입력한다. 비밀 값은 채팅이나 GitHub에 붙여 넣지 않는다.
+Dropbox 앱 콘솔에서 앱을 만들고, App folder + `files.content.write`, `files.content.read`, `files.metadata.read` 권한을 설정한다. 백업 목록/복원 기능은 `files.metadata.read`가 필요하므로 권한을 추가한 경우 `/dropbox-setup`에서 Dropbox를 다시 인증해 새 refresh token을 Render에 등록한다. 먼저 `DROPBOX_APP_KEY`와 `DROPBOX_APP_SECRET`을 Render 환경 변수에 입력해 배포한 뒤, 로그인한 상태에서 `/dropbox-setup`을 열어 인증코드를 갱신 토큰으로 교환한다. 토큰은 해당 페이지에 한 번 표시되며, 사용자가 `DROPBOX_REFRESH_TOKEN` 환경 변수에 직접 입력한다. 같은 페이지에서 백업 암호화 키도 생성해 `BACKUP_ENCRYPTION_KEY`에 입력한다. 비밀 값은 채팅이나 GitHub에 붙여 넣지 않는다.
 
 ## 복원 방법
 
