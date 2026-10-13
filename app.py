@@ -1074,6 +1074,7 @@ class Handler(BaseHTTPRequestHandler):
             path = urlparse(self.path).path
             if path == '/api/auth/status': api_auth_status(self); return
             if self._auth_required() and not _valid_session(self): json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED); return
+            _maybe_schedule_due_backup()
             if path == '/dropbox-setup':
                 if not _valid_session(self):
                     text_response(self, '로그인 후 이용하세요.', status=HTTPStatus.UNAUTHORIZED)
@@ -1123,6 +1124,7 @@ class Handler(BaseHTTPRequestHandler):
                 else: json_response(self, {'ok':False,'error':'Not found'}, HTTPStatus.NOT_FOUND)
                 return
             if self._auth_required() and not _valid_session(self): json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED); return
+            _maybe_schedule_due_backup()
             if path == '/api/dropbox/exchange':
                 api_dropbox_exchange(self)
             elif path == '/api/transactions':
@@ -1159,6 +1161,10 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         try:
             path = urlparse(self.path).path
+            if self._auth_required() and not _valid_session(self):
+                json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED)
+                return
+            _maybe_schedule_due_backup()
             if re.fullmatch(r'/api/notes/\d+', path):
                 api_note_delete(self, int(path.rsplit('/', 1)[1]))
             elif re.fullmatch(r'/api/transactions/\d+', path):
