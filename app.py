@@ -234,6 +234,7 @@ def _ensure_backup_table():
             last_attempt_at BIGINT,
             last_success_at BIGINT,
             last_file TEXT,
+            last_size_bytes BIGINT,
             last_error TEXT
         )""")
         conn.execute("INSERT INTO backup_state(id,last_change_at,status) VALUES(1,0,'idle') ON CONFLICT(id) DO NOTHING")
@@ -259,7 +260,7 @@ def _backup_state(conn=None):
 
 
 def _set_backup_state(**fields):
-    allowed = {"last_change_at", "status", "last_attempt_at", "last_success_at", "last_file", "last_error"}
+    allowed = {"last_change_at", "status", "last_attempt_at", "last_success_at", "last_file", "last_size_bytes", "last_error"}
     fields = {k: v for k, v in fields.items() if k in allowed}
     if not fields:
         return
@@ -365,10 +366,10 @@ def _run_due_backup():
             latest = _backup_state()
             latest_change = int((latest or {}).get("last_change_at") or 0)
             if latest_change > changed_at:
-                _set_backup_state(status="pending", last_success_at=now, last_file=uploaded_path, last_error=None)
+                _set_backup_state(status="pending", last_success_at=now, last_file=uploaded_path, last_size_bytes=len(encrypted), last_error=None)
                 _schedule_backup_timer(max(1, latest_change + BACKUP_QUIET_SECONDS - int(time.time())))
             else:
-                _set_backup_state(status="success", last_success_at=now, last_file=uploaded_path, last_error=None)
+                _set_backup_state(status="success", last_success_at=now, last_file=uploaded_path, last_size_bytes=len(encrypted), last_error=None)
         except Exception as exc:
             # Do not expose OAuth credentials, tokens, or provider response bodies.
             reason = "Dropbox 백업에 실패했습니다. 인증·권한·암호화 키 설정을 확인하세요."
@@ -416,6 +417,7 @@ def api_backup_status(handler):
         "last_attempt_at": state.get("last_attempt_at"),
         "last_success_at": state.get("last_success_at"),
         "last_file": state.get("last_file"),
+        "last_size_bytes": state.get("last_size_bytes"),
         "last_error": state.get("last_error"),
         "quiet_seconds": BACKUP_QUIET_SECONDS
     })
