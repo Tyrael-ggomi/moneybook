@@ -1418,7 +1418,10 @@ class Handler(BaseHTTPRequestHandler):
             elif path == '/api/backup/list':
                 api_backup_list(self)
             elif path == '/backup-restore':
-                text_response(self, backup_restore_page())
+                if not _valid_session(self):
+                    text_response(self, '로그인 후 이용하세요.', status=HTTPStatus.UNAUTHORIZED)
+                else:
+                    text_response(self, backup_restore_page())
             elif path == '/api/dropbox/authorize-url':
                 api_dropbox_authorize_url(self)
             elif path == '/api/bootstrap':
