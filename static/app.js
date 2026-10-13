@@ -144,6 +144,34 @@ async function apiSettings(kind, id=null, method='GET', body=null){
   return d;
 }
 function settingButton(label, cls='', extra=''){return `<button type="button" class="${cls}" ${extra}>${label}</button>`}
+async function loadBackupStatus(){
+  const el=$('backupSettingsStatus');
+  if(!el)return;
+  el.textContent='백업 상태 확인 중…';
+  try{
+    const r=await fetch('/api/backup/status',{cache:'no-store'});
+    const d=await r.json();
+    if(!r.ok)throw Error(d.error||'백업 상태를 확인할 수 없습니다.');
+    const labels={idle:'아직 백업 대기 내역 없음',pending:'자동 백업 예약됨',uploading:'백업 업로드 중',success:'최근 백업 성공',failed:'백업 실패 — 설정을 확인해 주세요',waiting_config:'Dropbox 설정 필요'};
+    let parts=['Dropbox 연결 '+(d.configured?'완료':'미완료'),labels[d.status]||d.status];
+    if(d.last_success_at){
+      parts.push('최근 성공 '+new Date(d.last_success_at*1000).toLocaleString('ko-KR'));
+      const ageSeconds=Math.max(0,Date.now()/1000-d.last_success_at);
+      if(ageSeconds>48*60*60)parts.push('마지막 성공이 48시간 이상 전입니다');
+    }
+    if(d.last_file)parts.push('파일 '+d.last_file);
+    if(d.last_size_bytes!=null)parts.push('크기 '+Number(d.last_size_bytes).toLocaleString('ko-KR')+'바이트');
+    if(d.last_error)parts.push(d.last_error);
+    el.textContent=parts.join(' · ');
+    el.classList.toggle('backupStatusWarn',!d.configured||d.status==='failed'||d.status==='waiting_config'||(d.last_success_at&&Date.now()/1000-d.last_success_at>48*60*60));
+    if(!d.configured)el.textContent+=' · 아래 고급 설정에서 연결 상태를 확인하세요.';
+  }catch(e){
+    el.textContent=e.message||'백업 상태를 확인할 수 없습니다.';
+    el.classList.add('backupStatusWarn');
+  }
+}
+$('refreshBackupBtn')?.addEventListener('click',()=>loadBackupStatus());
+
 async function loadSettings(){
   try{
     const [cards,cats,rules,names]=await Promise.all([
@@ -163,6 +191,7 @@ async function loadSettings(){
     $('rulesSettingsList').innerHTML=renderOrderList(rules.items,'rules');
     bindSettingsEvents(cards.items,cats.items,rules.items);
     bindSettingsActionButtons();bindSettingDrag();
+    loadBackupStatus();
   }catch(e){msg(e.message)}
 }
 function bindSettingDrag(){
