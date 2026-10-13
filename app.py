@@ -431,7 +431,9 @@ def _list_dropbox_backups():
     backups = []
     for item in entries:
         name = str(item.get("name") or "")
-        if item.get(".tag") != "file" or not name.startswith("moneybook-backup-") or not name.endswith(".json.gz.fernet"):
+        is_regular_backup = name.startswith("moneybook-backup-")
+        is_safety_backup = name.startswith("moneybook-pre-restore-")
+        if item.get(".tag") != "file" or not (is_regular_backup or is_safety_backup) or not name.endswith(".json.gz.fernet"):
             continue
         path_lower = str(item.get("path_lower") or "")
         if not path_lower:
@@ -440,7 +442,8 @@ def _list_dropbox_backups():
             "name": name,
             "path": path_lower,
             "modified": item.get("server_modified"),
-            "size": int(item.get("size") or 0)
+            "size": int(item.get("size") or 0),
+            "safety": is_safety_backup
         })
     backups.sort(key=lambda item: str(item.get("modified") or ""), reverse=True)
     return backups
@@ -648,7 +651,7 @@ async function loadBackups(){
     if(!backups.length){select.add(new Option("사용 가능한 백업이 없습니다",""));$("message").textContent="백업 파일을 찾지 못했습니다. Dropbox 연결 및 백업 상태를 확인하세요."}
     else{
       select.add(new Option("복원할 백업을 선택하세요",""));
-      backups.forEach((b,i)=>select.add(new Option(fmtDate(b.modified)+" · "+b.name+" · "+fmtSize(b.size),String(i))));
+      backups.forEach((b,i)=>select.add(new Option(fmtDate(b.modified)+" · "+b.name+(b.safety?" · 복원 전 안전 백업":"")+" · "+fmtSize(b.size),String(i))));
       $("message").textContent=backups.length+"개의 백업을 찾았습니다. 가장 최근 백업이 맨 위에 표시됩니다.";
     }
     updateDetails();
