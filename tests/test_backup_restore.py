@@ -63,5 +63,36 @@ class BackupPayloadTests(unittest.TestCase):
                 restore_backup.load_payload(self.path)
 
 
+class ImplicitCommitBackupTests(unittest.TestCase):
+    def test_context_manager_commit_schedules_backup(self):
+        import app
+
+        class FakeConnection:
+            def __init__(self):
+                self.commits = 0
+                self.statements = []
+
+            def execute(self, sql, params=()):
+                self.statements.append((sql, params))
+
+            def commit(self):
+                self.commits += 1
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        raw = FakeConnection()
+        wrapped = app.DBConn(raw, postgres=False)
+        with patch("app._schedule_backup_timer") as schedule:
+            with wrapped as conn:
+                conn.execute("UPDATE cards SET name=?", ("test",))
+            schedule.assert_called_once_with(600)
+        self.assertEqual(raw.commits, 2)
+        self.assertTrue(any("backup_state" in sql for sql, _ in raw.statements))
+
+
 if __name__ == "__main__":
     unittest.main()
