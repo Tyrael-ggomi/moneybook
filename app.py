@@ -55,7 +55,7 @@ class DBConn:
         self._backup_dirty = False
 
     def _track_backup_change(self, sql):
-        if re.match(r'^\s*(?:INSERT\s+INTO|UPDATE|DELETE\s+FROM)\s+["\x60]?(cards|categories|transactions|settings|auto_rules|notes)\b', str(sql), re.I):
+        if re.match(r'^\s*(?:(?:INSERT(?:\s+OR\s+\w+)?\s+INTO)|UPDATE|DELETE\s+FROM)\s+["\x60]?(cards|categories|transactions|settings|auto_rules|notes|auth_users|auth_passkeys)\b', str(sql), re.I):
             self._backup_dirty = True
 
     def __enter__(self):
@@ -218,7 +218,7 @@ def ensure_schema():
 
 
 # Dropbox automatic backup ----------------------------------------------------
-BACKUP_TABLES = ("cards", "categories", "transactions", "settings", "auto_rules", "notes")
+BACKUP_TABLES = ("cards", "categories", "settings", "auto_rules", "transactions", "notes", "auth_users", "auth_passkeys")
 BACKUP_QUIET_SECONDS = 10 * 60
 _backup_timer = None
 _backup_timer_lock = threading.Lock()
