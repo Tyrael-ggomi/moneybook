@@ -144,3 +144,13 @@ html,body{overflow-x:hidden}
 .filterDateLabel input{margin-top:6px}
 
 .authScreen{position:fixed;inset:0;z-index:1000;background:#f9fafb;display:flex;align-items:center;justify-content:center;padding:24px}.authScreen.hidden{display:none!important}.authBox{width:100%;max-width:360px;background:#fff;border:1px solid #e5e7eb;border-radius:22px;padding:28px 22px;box-shadow:0 12px 40px rgba(0,0,0,.1);text-align:center}.authBrand{font-size:30px;font-weight:900}.authSub{font-size:13px;color:#6b7280;margin:8px 0 24px}.authFaceBtn{width:100%;height:50px;font-size:15px}.authBox input{width:100%;box-sizing:border-box;margin:10px 0 8px}.authBox>button:not(.authFaceBtn){width:100%;height:46px}.authDivider{display:flex;align-items:center;gap:10px;color:#9ca3af;font-size:12px;margin:18px 0}.authDivider:before,.authDivider:after{content:'';height:1px;background:#e5e7eb;flex:1}.securityRow{display:flex;align-items:center;gap:8px;flex-wrap:wrap}.securityRow>div{flex:1;min-width:150px}.securityRow button{height:40px;font-size:12px}body.authLocked>nav,body.authLocked>header,body.authLocked>main{visibility:hidden}
+
+
+/* Backup status panel */
+.backupPanel{border:1px solid #e5e7eb;border-radius:14px;padding:12px;background:#f9fafb}
+.backupStatus{font-size:13px;line-height:1.6;overflow-wrap:anywhere;margin:0 0 10px}
+.backupStatusWarn{color:#92400e;background:#fff7ed;border-radius:9px;padding:10px}
+.backupActions{display:grid;grid-template-columns:1fr;gap:8px}
+.backupActions button,.backupSetupLink{display:flex;align-items:center;justify-content:center;min-height:42px;height:auto;padding:10px 12px;border-radius:10px;font-size:13px;font-weight:800;text-align:center}
+.backupSetupLink{border:1px solid #d1d5db;background:#fff;color:#111827;text-decoration:none}
+.backupPanel .settingsHint{line-height:1.5;margin:10px 2px 0}
