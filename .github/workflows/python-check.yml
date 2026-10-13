@@ -18,5 +18,17 @@ jobs:
         run: python -m pip install -r requirements.txt
       - name: Compile application
         run: python -m py_compile app.py restore_backup.py
+      - name: Check browser JavaScript syntax
+        run: node --check static/app.js
+      - name: Check Dropbox setup page JavaScript syntax
+        run: |
+          python - <<'PY'
+          import app
+          from pathlib import Path
+          html = app.dropbox_setup_page()
+          script = html.split("<script>", 1)[1].split("</script>", 1)[0]
+          Path("/tmp/dropbox-setup.js").write_text(script, encoding="utf-8")
+          PY
+          node --check /tmp/dropbox-setup.js
       - name: Run backup restore tests
         run: python -m unittest discover -s tests
