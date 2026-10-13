@@ -673,8 +673,8 @@ $("restoreBtn").addEventListener("click",async()=>{
  try{
   const r=await fetch("/api/backup/restore",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({path:b.path,confirmation:"RESTORE"})});
   const d=await r.json();if(!r.ok||!d.ok)throw new Error(d.error||"복원에 실패했습니다.");
-  const counts=Object.entries(d.counts||{}).map(([k,v])=>k+": "+v+"개").join("\n");
-  $("message").textContent="복원 완료!\n"+(d.message||"")+"\n안전 백업: "+d.safety_backup+"\n\n복원된 항목:\n"+counts+"\n\n다시 로그인해 정상 작동을 확인하세요.";
+  const counts=Object.entries(d.counts||{}).map(([k,v])=>k+": "+v+"개").join("\\n");
+  $("message").textContent="복원 완료!\\n"+(d.message||"")+"\\n안전 백업: "+d.safety_backup+"\\n\\n복원된 항목:\\n"+counts+"\\n\\n다시 로그인해 정상 작동을 확인하세요.";
   $("confirmText").value="";$("backupSelect").value="";updateDetails();
  }catch(e){$("message").textContent=e.message||"복원에 실패했습니다."}
  finally{$("refreshList").disabled=false;updateButton()}
