@@ -43,7 +43,7 @@ class BackupRestoreSafetyTests(unittest.TestCase):
         with patch("app._list_dropbox_backups") as list_backups:
             app.api_backup_restore(handler)
         self.assertEqual(handler.status, 400)
-        self.assertFalse(list_backups.called)
+        list_backups.assert_not_called()
         self.assertFalse(handler.response_json()["ok"])
 
     def test_restore_rejects_path_not_in_fresh_backup_listing(self):
@@ -72,6 +72,30 @@ class BackupRestoreSafetyTests(unittest.TestCase):
         self.assertFalse(handler.response_json()["ok"])
         self.assertTrue(app._backup_run_lock.acquire(blocking=False))
         app._backup_run_lock.release()
+
+    def test_successful_restore_creates_safety_copy_before_restoring(self):
+        handler = FakeHandler({"path": self.selected["path"], "confirmation": "RESTORE"})
+        counts = {table: 0 for table in (
+            "cards", "categories", "settings", "auto_rules",
+            "transactions", "notes", "auth_users", "auth_passkeys"
+        )}
+        with patch("app._dropbox_configured", return_value=True), \
+             patch("app._list_dropbox_backups", return_value=[self.selected]), \
+             patch("app._download_dropbox_file", return_value=b"encrypted-test-content"), \
+             patch("restore_backup.load_payload", return_value={"format": "moneybook-backup-v1"}), \
+             patch("app._create_encrypted_backup", return_value=("moneybook-backup-current.json.gz.fernet", b"safety-bytes")), \
+             patch("app._upload_dropbox_backup", return_value="/moneybook-pre-restore-current.json.gz.fernet") as upload, \
+             patch("restore_backup.restore", return_value=counts) as restore, \
+             patch("app._set_backup_state") as set_state:
+            app.api_backup_restore(handler)
+        self.assertEqual(handler.status, 200)
+        upload.assert_called_once_with("moneybook-pre-restore-current.json.gz.fernet", b"safety-bytes")
+        restore.assert_called_once()
+        set_state.assert_called_once()
+        response = handler.response_json()
+        self.assertTrue(response["ok"])
+        self.assertEqual(response["safety_backup"], "/moneybook-pre-restore-current.json.gz.fernet")
+        self.assertEqual(response["counts"], counts)
 
 
 if __name__ == "__main__":
