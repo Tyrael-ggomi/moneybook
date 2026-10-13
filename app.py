@@ -484,7 +484,7 @@ def api_backup_list(handler):
         json_response(handler, {"ok": True, "backups": _list_dropbox_backups()})
     except Exception as exc:
         # Do not leak provider response bodies or credentials.
-        json_response(handler, {"ok": False, "error": "Dropbox 백업 목록을 불러오지 못했습니다. 연결 및 권한을 확인하세요."}, HTTPStatus.BAD_GATEWAY)
+        json_response(handler, {"ok": False, "error": "Dropbox 백업 목록을 불러오지 못했습니다. 앱 권한에 files.metadata.read, files.content.read가 있는지 확인하고 Dropbox 연결을 다시 인증하세요."}, HTTPStatus.BAD_GATEWAY)
 
 
 def api_backup_restore(handler):
@@ -727,6 +727,7 @@ a{color:#1d4ed8}.topLink{display:inline-block;margin-bottom:12px}.status{overflo
 <button id="copyKey" type="button" disabled>암호화 키 복사</button>
 <p class="warn">기존 키를 새 키로 바꾸면 예전 백업을 복호화할 수 없게 됩니다. 키가 이미 설정되어 있다면 이 페이지에서 새 키를 만들지 마세요.</p>
 <p><small>필요한 Render 환경 변수: DROPBOX_APP_KEY, DROPBOX_APP_SECRET, DROPBOX_REFRESH_TOKEN, BACKUP_ENCRYPTION_KEY. DROPBOX_BACKUP_PATH는 선택사항이며 비우면 Dropbox 앱 폴더 최상위에 저장합니다.</small></p>
+<p><small>백업 목록 및 복원에는 Dropbox 앱 권한 files.metadata.read, files.content.read, files.content.write가 필요합니다. 권한을 추가했다면 이 페이지에서 Dropbox 연결을 다시 인증해 새 토큰을 Render에 등록하세요.</small></p>
 </main>
 <script>
 const $=id=>document.getElementById(id);
