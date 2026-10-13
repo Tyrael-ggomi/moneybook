@@ -30,8 +30,8 @@ Render 무료 웹 서비스는 일정 시간 외부 요청이 없으면 잠들 �
 - `DROPBOX_APP_KEY`
 - `DROPBOX_APP_SECRET`
 - `DROPBOX_REFRESH_TOKEN`
-- `DROPBOX_BACKUP_PATH` (예: `/apps/moneybook-backup`)
-- `BACKUP_ENCRYPTION_KEY`
+- `DROPBOX_BACKUP_PATH` (선택; 비우면 Dropbox 앱 폴더 최상위)
+- `BACKUP_ENCRYPTION_KEY` (머니북의 `/dropbox-setup` 페이지에서 생성)
 
 Dropbox는 앱 폴더 접근만 허용하도록 설정한다. 토큰은 권한 범위를 최소화한다.
 
@@ -48,4 +48,10 @@ Dropbox는 앱 폴더 접근만 허용하도록 설정한다. 토큰은 권한 �
 
 ## 사용자 확인이 필요한 작업
 
-Dropbox 앱 콘솔에서 앱을 만들고, App folder + 필요한 OAuth 권한으로 설정한 다음 refresh token을 발급해야 한다. 비밀 값은 사용자 본인만 Render 환경 변수에 입력하며, 채팅에 붙여 넣지 않는다.
+Dropbox 앱 콘솔에서 앱을 만들고, App folder + `files.content.write` 권한을 설정한다. 먼저 `DROPBOX_APP_KEY`와 `DROPBOX_APP_SECRET`을 Render 환경 변수에 입력해 배포한 뒤, 로그인한 상태에서 `/dropbox-setup`을 열어 인증코드를 갱신 토큰으로 교환한다. 토큰은 해당 페이지에 한 번 표시되며, 사용자가 `DROPBOX_REFRESH_TOKEN` 환경 변수에 직접 입력한다. 같은 페이지에서 백업 암호화 키도 생성해 `BACKUP_ENCRYPTION_KEY`에 입력한다. 비밀 값은 채팅이나 GitHub에 붙여 넣지 않는다.
+
+## 첫 구현 참고
+
+- OAuth 인증코드 교환은 로그인된 머니북 세션에서만 가능하며, refresh token은 DB에 저장하거나 서버 로그에 기록하지 않는다. 토큰은 교환 후 사용자에게 한 번 표시되고 Render 환경 변수에 수동 입력한다.
+- Dropbox App Folder 앱에서는 API 경로가 앱 전용 폴더를 기준으로 한다. `DROPBOX_BACKUP_PATH`를 비우면 해당 폴더의 최상위에 백업 파일을 둔다.
+- `/dropbox-setup`은 연결 준비용 비공개 페이지이며, `/api/backup/status`는 로그인 세션이 필요하다.
