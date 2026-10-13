@@ -63,6 +63,11 @@ class DBConn:
         return self
 
     def __exit__(self, exc_type, exc, tb):
+        # Also track writes in callers that rely on the connection context manager
+        # to commit implicitly instead of calling conn.commit() themselves.
+        if exc_type is None:
+            self.commit()
+            return self.raw.__exit__(None, None, None)
         return self.raw.__exit__(exc_type, exc, tb)
 
     def _sql(self, sql):
