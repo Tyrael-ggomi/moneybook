@@ -33,12 +33,27 @@ from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
-try:
-    from webauthn import generate_registration_options, verify_registration_response, generate_authentication_options, verify_authentication_response, options_to_json, base64url_to_bytes
-    from webauthn.helpers.structs import AuthenticatorSelectionCriteria, AuthenticatorAttachment, ResidentKeyRequirement, UserVerificationRequirement, PublicKeyCredentialDescriptor, AuthenticatorTransport
-    WEBAUTHN_AVAILABLE=True
-except ImportError:
-    WEBAUTHN_AVAILABLE=False
+import importlib.util
+
+# webauthn is the heaviest import in the app and is only needed for Face ID
+# login/registration. Load it on first use so a cold start (e.g. Render free
+# plan waking up) binds the port sooner.
+WEBAUTHN_AVAILABLE = importlib.util.find_spec('webauthn') is not None
+_webauthn_loaded = False
+_webauthn_lock = threading.Lock()
+
+
+def _load_webauthn():
+    global _webauthn_loaded, generate_registration_options, verify_registration_response, generate_authentication_options, verify_authentication_response, options_to_json
+    global AuthenticatorSelectionCriteria, AuthenticatorAttachment, ResidentKeyRequirement, UserVerificationRequirement, PublicKeyCredentialDescriptor, AuthenticatorTransport
+    if _webauthn_loaded:
+        return
+    with _webauthn_lock:
+        if _webauthn_loaded:
+            return
+        from webauthn import generate_registration_options, verify_registration_response, generate_authentication_options, verify_authentication_response, options_to_json
+        from webauthn.helpers.structs import AuthenticatorSelectionCriteria, AuthenticatorAttachment, ResidentKeyRequirement, UserVerificationRequirement, PublicKeyCredentialDescriptor, AuthenticatorTransport
+        _webauthn_loaded = True
 
 APP_DIR = Path(__file__).resolve().parent
 DATABASE_URL = os.environ.get('DATABASE_URL', '').strip()
@@ -810,10 +825,14 @@ def _password_check(password,encoded):
         candidate=hashlib.scrypt(str(password).encode(),salt=_unb64(salt),n=2**14,r=8,p=1,dklen=32)
         return hmac.compare_digest(candidate,_unb64(digest))
     except Exception: return False
+_auth_secret_cache=None
 def _auth_secret(conn):
+    global _auth_secret_cache
+    if _auth_secret_cache: return _auth_secret_cache
     row=conn.execute("SELECT value FROM auth_meta WHERE key='session_secret'").fetchone()
-    if row: return str(row['value'])
-    secret=_b64(secrets.token_bytes(32)); conn.execute("INSERT INTO auth_meta(key,value) VALUES(?,?)",('session_secret',secret)); conn.commit(); return secret
+    if row:
+        _auth_secret_cache=str(row['value']); return _auth_secret_cache
+    secret=_b64(secrets.token_bytes(32)); conn.execute("INSERT INTO auth_meta(key,value) VALUES(?,?)",('session_secret',secret)); conn.commit(); _auth_secret_cache=secret; return secret
 def _make_session(conn):
     expires=_now_ts()+AUTH_TTL; payload='1.'+str(expires)
     sig=_b64(hmac.new(_auth_secret(conn).encode(),payload.encode(),hashlib.sha256).digest())
@@ -828,9 +847,28 @@ def _valid_session(handler):
     try: expires=int(parts[1])
     except ValueError: return False
     if expires<_now_ts(): return False
-    with db() as conn: secret=_auth_secret(conn).encode()
+    if _auth_secret_cache: secret=_auth_secret_cache.encode()
+    else:
+        with db() as conn: secret=_auth_secret(conn).encode()
     expected=_b64(hmac.new(secret,('1.'+str(expires)).encode(),hashlib.sha256).digest())
     return hmac.compare_digest(expected,parts[2])
+def _valid_api_token(handler):
+    """Optional static token for automations such as iOS Shortcuts.
+
+    Enabled only when MONEYBOOK_API_TOKEN is set. Send it as
+    `Authorization: Bearer <token>` or `X-Moneybook-Token: <token>`.
+    """
+    expected=os.environ.get('MONEYBOOK_API_TOKEN','').strip()
+    if len(expected)<16: return False
+    path=urlparse(handler.path).path
+    # Backup/restore and Dropbox setup stay cookie-only.
+    if path.startswith('/api/backup/') or path.startswith('/api/dropbox/'): return False
+    supplied=str(handler.headers.get('X-Moneybook-Token','')).strip()
+    auth=str(handler.headers.get('Authorization','')).strip()
+    if not supplied and auth.lower().startswith('bearer '): supplied=auth[7:].strip()
+    return bool(supplied) and hmac.compare_digest(supplied.encode(),expected.encode())
+def _authorized(handler):
+    return _valid_api_token(handler) or _valid_session(handler)
 def _set_session_cookie(handler,token):
     secure=' Secure;' if str(handler.headers.get('X-Forwarded-Proto','')).lower()=='https' or handler.server.server_port==443 else ''
     handler.send_header('Set-Cookie',AUTH_COOKIE+'='+token+'; Path=/; HttpOnly; SameSite=Strict;'+secure+' Max-Age='+str(AUTH_TTL))
@@ -883,6 +921,10 @@ def api_auth_logout(handler):
     raw=b'{"ok":true}'; handler.send_response(HTTPStatus.OK); handler.send_header('Content-Type','application/json; charset=utf-8'); handler.send_header('Content-Length',str(len(raw))); handler.send_header('Cache-Control','no-store'); _clear_session_cookie(handler); handler.end_headers(); handler.wfile.write(raw)
 def _require_webauthn(handler):
     if not WEBAUTHN_AVAILABLE: raise RuntimeError('WebAuthn 모듈이 설치되지 않았습니다. Render 재배포 후 다시 시도하세요.')
+    try:
+        _load_webauthn()
+    except ImportError:
+        raise RuntimeError('WebAuthn 모듈이 설치되지 않았습니다. Render 재배포 후 다시 시도하세요.')
 def api_passkey_register_options(handler):
     _require_webauthn(handler)
     if not _valid_session(handler): raise PermissionError('로그인 후 Face ID를 등록할 수 있습니다.')
@@ -1085,6 +1127,92 @@ def api_import_transactions(handler):
         conn.executemany("INSERT INTO transactions (tx_date,tx_time,amount,card_id,category_id,content,user_percent,wife_percent,installment_months) VALUES (?,?,?,?,?,?,?,?,?)",prepared)
         conn.commit()
     json_response(handler,{'ok':True,'count':len(prepared)})
+
+
+BATCH_MAX_ROWS=500
+
+
+def _parse_batch_rows(handler):
+    """Accept JSON ({"rows": [...]} or [...]) or JSON Lines text.
+
+    JSON Lines is what an iOS Shortcut produces with "파일에 추가" (append one
+    JSON object per payment to a text file); the whole file can be sent as-is.
+    Returns a list of (line_no, row_or_error).
+    """
+    length=int(handler.headers.get('Content-Length','0') or 0)
+    if length>1_000_000: raise ValueError('요청 데이터가 너무 큽니다.')
+    text=handler.rfile.read(length).decode('utf-8-sig').strip()
+    if not text: raise ValueError('업로드할 내역이 없습니다.')
+    try:
+        data=json.loads(text)
+    except ValueError:
+        data=None
+    if isinstance(data,dict) and isinstance(data.get('rows'),list):
+        return list(enumerate(data['rows'],1))
+    if isinstance(data,list):
+        return list(enumerate(data,1))
+    if isinstance(data,dict):
+        return [(1,data)]
+    out=[]
+    for no,line in enumerate(text.splitlines(),1):
+        line=line.strip().rstrip(',')
+        if not line: continue
+        try: out.append((no,json.loads(line)))
+        except ValueError: out.append((no,ValueError('JSON 형식이 아닙니다.')))
+    return out
+
+
+def _resolve_named_id(conn,table,row,id_key,name_key):
+    value=row.get(id_key)
+    if value not in (None,'',0,'0'): return value
+    name=str(row.get(name_key) or '').strip()
+    if not name: return value
+    found=conn.execute(f"SELECT id FROM {table} WHERE name=? AND active=1 ORDER BY sort_order,id LIMIT 1",(name,)).fetchone()
+    if not found: raise ValueError(f"'{name}' 항목을 찾을 수 없습니다.")
+    return found['id']
+
+
+def api_batch_transactions(handler):
+    """Idempotent bulk upload for payments queued while the server was asleep.
+
+    Rows already in the DB (same date, time, amount, card, content) are
+    skipped, so re-sending the whole backlog file is safe. Identical rows that
+    appear N times in the upload are kept up to N times. Rows that fail
+    validation are reported per line without blocking the others.
+    """
+    rows=_parse_batch_rows(handler)
+    if len(rows)>BATCH_MAX_ROWS: raise ValueError(f'한 번에 최대 {BATCH_MAX_ROWS}건까지 업로드할 수 있습니다.')
+    results=[]; inserted=duplicates=errors=0
+    with db() as conn:
+        fallback=conn.execute("SELECT id FROM categories WHERE name='미정' AND active=1 LIMIT 1").fetchone()
+        fallback_id=fallback['id'] if fallback else None
+        seen={}
+        to_insert=[]
+        for no,row in rows:
+            try:
+                if isinstance(row,Exception): raise row
+                if not isinstance(row,dict): raise ValueError('형식이 올바르지 않습니다.')
+                if not str(row.get('date') or '').strip(): raise ValueError('날짜가 없습니다. 밀린 내역은 결제일을 꼭 포함하세요.')
+                row=dict(row)
+                row['card_id']=_resolve_named_id(conn,'cards',row,'card_id','card')
+                if row.get('card_id') in (None,''): raise ValueError('카드(card_id 또는 card)가 없습니다.')
+                row['category_id']=_resolve_named_id(conn,'categories',row,'category_id','category')
+                if row.get('category_id') in (None,'',0,'0') and not apply_auto_category(conn,str(row.get('content') or '').strip()):
+                    row['category_id']=fallback_id
+                values=validate_transaction_payload(conn,row)
+            except Exception as e:
+                errors+=1; results.append({'line':no,'status':'error','error':str(e)}); continue
+            key=values[:4]+(values[5],)  # date, time, amount, card_id, content
+            seen[key]=seen.get(key,0)+1
+            existing=conn.execute("SELECT COUNT(*) AS n FROM transactions WHERE tx_date=? AND tx_time=? AND amount=? AND card_id=? AND content=?",key).fetchone()
+            existing=int(existing['n'] if USING_POSTGRES else existing[0])
+            if seen[key]<=existing:
+                duplicates+=1; results.append({'line':no,'status':'duplicate'}); continue
+            to_insert.append(values); inserted+=1; results.append({'line':no,'status':'inserted'})
+        if to_insert:
+            conn.executemany("INSERT INTO transactions (tx_date,tx_time,amount,card_id,category_id,content,user_percent,wife_percent,installment_months) VALUES (?,?,?,?,?,?,?,?,?)",to_insert)
+        conn.commit()
+    json_response(handler,{'ok':errors==0,'inserted':inserted,'duplicates':duplicates,'errors':errors,'results':results})
 
 
 def api_bulk_update_transactions(handler):
@@ -1398,19 +1526,63 @@ def api_settlement_details(handler):
     json_response(handler,{'month':month,'kind':kind,'total':total,'transactions':out})
 
 
+_init_lock=threading.Lock()
+_init_done=False
+
+
+def ensure_ready():
+    """Run schema checks once. Called in the background at boot and lazily by
+    requests, so the port opens immediately and a transient DB error at boot
+    is retried on the next request instead of crashing the process."""
+    global _init_done
+    if _init_done: return
+    with _init_lock:
+        if _init_done: return
+        ensure_schema()
+        _maybe_schedule_due_backup()
+        _init_done=True
+
+
+def _background_init():
+    try:
+        ensure_ready()
+    except Exception as e:
+        print('[init] 초기화 실패, 다음 요청에서 재시도합니다:', e)
+
+
+HEALTH_PATHS=('/health','/healthz')
+
+
 class Handler(BaseHTTPRequestHandler):
+    def _health(self, head=False):
+        # No DB, no auth: cheap enough for a keep-alive pinger.
+        raw=b'ok'
+        self.send_response(HTTPStatus.OK)
+        self.send_header('Content-Type','text/plain; charset=utf-8')
+        self.send_header('Content-Length',str(len(raw)))
+        self.send_header('Cache-Control','no-store')
+        self.end_headers()
+        if not head: self.wfile.write(raw)
+
+    def do_HEAD(self):
+        if urlparse(self.path).path in HEALTH_PATHS: self._health(head=True); return
+        self.send_response(HTTPStatus.METHOD_NOT_ALLOWED); self.send_header('Content-Length','0'); self.end_headers()
+
     def _auth_required(self):
         path=urlparse(self.path).path
         return path.startswith('/api/') and not path.startswith('/api/auth/') and path!='/api/auth/status'
 
     def log_message(self, fmt, *args):
+        if urlparse(self.path).path in HEALTH_PATHS: return  # keep logs quiet for pings
         print('[HTTP]', fmt % args)
 
     def do_GET(self):
         try:
             path = urlparse(self.path).path
+            if path in HEALTH_PATHS: self._health(); return
+            ensure_ready()
             if path == '/api/auth/status': api_auth_status(self); return
-            if self._auth_required() and not _valid_session(self): json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED); return
+            if self._auth_required() and not _authorized(self): json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED); return
             _maybe_schedule_due_backup()
             if path == '/dropbox-setup':
                 if not _valid_session(self):
@@ -1460,6 +1632,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             path = urlparse(self.path).path
+            ensure_ready()
             if path.startswith('/api/auth/'):
                 if path == '/api/auth/login': api_auth_login(self)
                 elif path == '/api/auth/logout': api_auth_logout(self)
@@ -1469,7 +1642,7 @@ class Handler(BaseHTTPRequestHandler):
                 elif path == '/api/auth/passkey/authenticate/verify': api_passkey_auth_verify(self)
                 else: json_response(self, {'ok':False,'error':'Not found'}, HTTPStatus.NOT_FOUND)
                 return
-            if self._auth_required() and not _valid_session(self): json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED); return
+            if self._auth_required() and not _authorized(self): json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED); return
             _maybe_schedule_due_backup()
             if path == '/api/backup/restore':
                 api_backup_restore(self)
@@ -1479,6 +1652,8 @@ class Handler(BaseHTTPRequestHandler):
                 api_add_transaction(self)
             elif path == '/api/transactions/import':
                 api_import_transactions(self)
+            elif path == '/api/transactions/batch':
+                api_batch_transactions(self)
             elif path == '/api/transactions/check_duplicates':
                 api_check_duplicates(self)
             elif path == '/api/notes':
@@ -1509,7 +1684,8 @@ class Handler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         try:
             path = urlparse(self.path).path
-            if self._auth_required() and not _valid_session(self):
+            ensure_ready()
+            if self._auth_required() and not _authorized(self):
                 json_response(self, {'ok':False,'error':'로그인이 필요합니다.','authenticated':False}, HTTPStatus.UNAUTHORIZED)
                 return
             _maybe_schedule_due_backup()
@@ -1524,12 +1700,14 @@ class Handler(BaseHTTPRequestHandler):
 
 
 def main():
-    ensure_schema()
-    _maybe_schedule_due_backup()
+    # Bind the port first so Render sees the service as up as early as possible,
+    # then run schema checks in the background (requests wait for them).
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    server.daemon_threads = True
+    threading.Thread(target=_background_init, name='moneybook-init', daemon=True).start()
     print('머니북 모바일 v0.6.5 (Supabase-ready)')
     print(f'DB: {DB_PATH}')
     print(f'Open: http://127.0.0.1:{PORT}')
-    server = ThreadingHTTPServer((HOST, PORT), Handler)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
