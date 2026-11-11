@@ -18,6 +18,11 @@
 </nav>
 <header class="topbar"><div><div class="brand">머니북</div><div class="version">모바일 v0.8.2</div></div><div id="dbStatus" class="status">연결 중…</div></header>
 <main>
+<section id="inboxCard" class="card inboxCard hidden">
+  <div class="listHead"><h2>카드결제 보관함</h2><button type="button" id="inboxCloseBtn" class="iconBtn" aria-label="닫기">×</button></div>
+  <p id="inboxNotice" class="message ok"></p>
+  <div id="inboxList" class="inboxList"></div>
+</section>
 <section class="card expenseView">
   <h1>지출 입력</h1>
   <form id="expenseForm">

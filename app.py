@@ -198,6 +198,7 @@ def get_settings(conn):
 def ensure_schema():
     """Keep the local SQLite schema compatible; Supabase schema is created by migration SQL."""
     _ensure_backup_table()
+    _ensure_inbox_table()
     if USING_POSTGRES:
         with db() as conn:
             required = conn.execute("SELECT COUNT(*) AS n FROM information_schema.tables WHERE table_schema='public' AND table_name IN ('cards','categories','transactions','settings','auto_rules','notes')").fetchone()
@@ -259,6 +260,37 @@ def _ensure_backup_table():
             last_error TEXT
         )""")
         conn.execute("INSERT INTO backup_state(id,last_change_at,status) VALUES(1,0,'idle') ON CONFLICT(id) DO NOTHING")
+        conn.commit()
+
+
+def _ensure_inbox_table():
+    """Holding table for card payments sent by the iOS Shortcut.
+
+    On Supabase the Shortcut inserts rows straight into this table through the
+    always-on REST API (see docs/COLDSTART_SHORTCUT.md), so nothing is lost
+    while this server is asleep. Rows are imported when the app is opened.
+    """
+    with db() as conn:
+        if USING_POSTGRES:
+            conn.execute("""CREATE TABLE IF NOT EXISTS card_inbox (
+                id BIGSERIAL PRIMARY KEY,
+                received_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                payload JSONB NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                tx_id BIGINT,
+                processed_at BIGINT
+            )""")
+        else:
+            conn.execute("""CREATE TABLE IF NOT EXISTS card_inbox (
+                id INTEGER PRIMARY KEY,
+                received_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+                payload TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'pending',
+                error TEXT,
+                tx_id INTEGER,
+                processed_at INTEGER
+            )""")
         conn.commit()
 
 
@@ -1172,6 +1204,113 @@ def _resolve_named_id(conn,table,row,id_key,name_key):
     return found['id']
 
 
+def _fallback_category_id(conn):
+    fallback=conn.execute("SELECT id FROM categories WHERE name='미정' AND active=1 LIMIT 1").fetchone()
+    return fallback['id'] if fallback else None
+
+
+def _prepare_queued_row(conn,row,fallback_id):
+    """Validate one queued payment (batch upload or card inbox) and return the
+    transactions INSERT values. Cards/categories may be given by name, the date
+    is required, and uncategorised rows fall back to '미정'."""
+    if isinstance(row,Exception): raise row
+    if not isinstance(row,dict): raise ValueError('형식이 올바르지 않습니다.')
+    if not str(row.get('date') or '').strip(): raise ValueError('날짜가 없습니다. 밀린 내역은 결제일을 꼭 포함하세요.')
+    row=dict(row)
+    row['card_id']=_resolve_named_id(conn,'cards',row,'card_id','card')
+    if row.get('card_id') in (None,''): raise ValueError('카드(card_id 또는 card)가 없습니다.')
+    row['category_id']=_resolve_named_id(conn,'categories',row,'category_id','category')
+    if row.get('category_id') in (None,'',0,'0') and not apply_auto_category(conn,str(row.get('content') or '').strip()):
+        row['category_id']=fallback_id
+    return validate_transaction_payload(conn,row)
+
+
+TX_INSERT_SQL="INSERT INTO transactions (tx_date,tx_time,amount,card_id,category_id,content,user_percent,wife_percent,installment_months) VALUES (?,?,?,?,?,?,?,?,?)"
+INBOX_KEEP_IMPORTED_SECONDS=30*24*60*60
+
+
+def _inbox_payload(value):
+    if isinstance(value,(dict,list)): return value
+    try: return json.loads(value)
+    except (TypeError,ValueError): return value
+
+
+def process_card_inbox(conn,only_id=None,force=False):
+    """Move waiting card payments from card_inbox into transactions.
+
+    Rows are claimed with a single UPDATE inside this transaction, so two
+    screens opening at once cannot import the same payment twice. Valid rows
+    become transactions; rows that match an existing transaction are marked
+    'duplicate' and rows that fail validation 'error' (both stay visible so
+    nothing disappears silently). `only_id` retries one problem row and
+    `force` adds it even if it looks like a duplicate.
+    """
+    if only_id is None:
+        claimed=conn.execute("UPDATE card_inbox SET status='processing' WHERE status='pending' RETURNING id,payload").fetchall()
+    else:
+        claimed=conn.execute("UPDATE card_inbox SET status='processing' WHERE id=? AND status IN ('duplicate','error','pending') RETURNING id,payload",(only_id,)).fetchall()
+    counts={'imported':0,'duplicates':0,'errors':0}
+    if not claimed: return counts
+    fallback_id=_fallback_category_id(conn); now=int(time.time())
+    for item in sorted(claimed,key=lambda r:r['id']):
+        conn.execute("SAVEPOINT inbox_row")
+        try:
+            values=_prepare_queued_row(conn,_inbox_payload(item['payload']),fallback_id)
+            key=values[:4]+(values[5],)  # date, time, amount, card_id, content
+            existing=conn.execute("SELECT id FROM transactions WHERE tx_date=? AND tx_time=? AND amount=? AND card_id=? AND content=? LIMIT 1",key).fetchone()
+            if existing and not force:
+                conn.execute("UPDATE card_inbox SET status='duplicate',error=?,tx_id=?,processed_at=? WHERE id=?",('같은 내역이 이미 있습니다.',existing['id'],now,item['id']))
+                counts['duplicates']+=1
+            else:
+                tx_id=conn.execute(TX_INSERT_SQL+" RETURNING id",values).fetchone()['id']
+                conn.execute("UPDATE card_inbox SET status='imported',error=NULL,tx_id=?,processed_at=? WHERE id=?",(tx_id,now,item['id']))
+                counts['imported']+=1
+            conn.execute("RELEASE SAVEPOINT inbox_row")
+        except Exception as e:
+            conn.execute("ROLLBACK TO SAVEPOINT inbox_row"); conn.execute("RELEASE SAVEPOINT inbox_row")
+            conn.execute("UPDATE card_inbox SET status='error',error=?,processed_at=? WHERE id=?",(str(e)[:300],now,item['id']))
+            counts['errors']+=1
+    conn.execute("DELETE FROM card_inbox WHERE status='imported' AND processed_at<?",(now-INBOX_KEEP_IMPORTED_SECONDS,))
+    return counts
+
+
+def _inbox_problem_items(conn):
+    rows=conn.execute("SELECT id,received_at,payload,status,error FROM card_inbox WHERE status IN ('duplicate','error') ORDER BY id").fetchall()
+    return [{'id':r['id'],'received_at':r['received_at'],'payload':_inbox_payload(r['payload']),'status':r['status'],'error':r['error']} for r in rows]
+
+
+def api_inbox_process(handler):
+    with db() as conn:
+        counts=process_card_inbox(conn)
+        items=_inbox_problem_items(conn)
+        conn.commit()
+    json_response(handler,{'ok':True,**counts,'items':items})
+
+
+def api_inbox_list(handler):
+    with db() as conn:
+        items=_inbox_problem_items(conn)
+    json_response(handler,{'ok':True,'items':items})
+
+
+def api_inbox_retry(handler,item_id):
+    with db() as conn:
+        counts=process_card_inbox(conn,only_id=item_id,force=True)
+        items=_inbox_problem_items(conn)
+        conn.commit()
+    if not any(counts.values()): raise ValueError('보관함에서 해당 내역을 찾을 수 없습니다.')
+    json_response(handler,{'ok':counts['errors']==0,**counts,'items':items})
+
+
+def api_inbox_delete(handler,item_id):
+    with db() as conn:
+        cur=conn.execute("DELETE FROM card_inbox WHERE id=? AND status<>'imported'",(item_id,))
+        if cur.rowcount==0: raise ValueError('보관함에서 해당 내역을 찾을 수 없습니다.')
+        items=_inbox_problem_items(conn)
+        conn.commit()
+    json_response(handler,{'ok':True,'items':items})
+
+
 def api_batch_transactions(handler):
     """Idempotent bulk upload for payments queued while the server was asleep.
 
@@ -1184,22 +1323,12 @@ def api_batch_transactions(handler):
     if len(rows)>BATCH_MAX_ROWS: raise ValueError(f'한 번에 최대 {BATCH_MAX_ROWS}건까지 업로드할 수 있습니다.')
     results=[]; inserted=duplicates=errors=0
     with db() as conn:
-        fallback=conn.execute("SELECT id FROM categories WHERE name='미정' AND active=1 LIMIT 1").fetchone()
-        fallback_id=fallback['id'] if fallback else None
+        fallback_id=_fallback_category_id(conn)
         seen={}
         to_insert=[]
         for no,row in rows:
             try:
-                if isinstance(row,Exception): raise row
-                if not isinstance(row,dict): raise ValueError('형식이 올바르지 않습니다.')
-                if not str(row.get('date') or '').strip(): raise ValueError('날짜가 없습니다. 밀린 내역은 결제일을 꼭 포함하세요.')
-                row=dict(row)
-                row['card_id']=_resolve_named_id(conn,'cards',row,'card_id','card')
-                if row.get('card_id') in (None,''): raise ValueError('카드(card_id 또는 card)가 없습니다.')
-                row['category_id']=_resolve_named_id(conn,'categories',row,'category_id','category')
-                if row.get('category_id') in (None,'',0,'0') and not apply_auto_category(conn,str(row.get('content') or '').strip()):
-                    row['category_id']=fallback_id
-                values=validate_transaction_payload(conn,row)
+                values=_prepare_queued_row(conn,row,fallback_id)
             except Exception as e:
                 errors+=1; results.append({'line':no,'status':'error','error':str(e)}); continue
             key=values[:4]+(values[5],)  # date, time, amount, card_id, content
@@ -1210,7 +1339,7 @@ def api_batch_transactions(handler):
                 duplicates+=1; results.append({'line':no,'status':'duplicate'}); continue
             to_insert.append(values); inserted+=1; results.append({'line':no,'status':'inserted'})
         if to_insert:
-            conn.executemany("INSERT INTO transactions (tx_date,tx_time,amount,card_id,category_id,content,user_percent,wife_percent,installment_months) VALUES (?,?,?,?,?,?,?,?,?)",to_insert)
+            conn.executemany(TX_INSERT_SQL,to_insert)
         conn.commit()
     json_response(handler,{'ok':errors==0,'inserted':inserted,'duplicates':duplicates,'errors':errors,'results':results})
 
@@ -1602,6 +1731,8 @@ class Handler(BaseHTTPRequestHandler):
                 api_dropbox_authorize_url(self)
             elif path == '/api/bootstrap':
                 api_bootstrap(self)
+            elif path == '/api/inbox':
+                api_inbox_list(self)
             elif path == '/api/transactions':
                 api_transactions(self)
             elif re.fullmatch(r'/api/transactions/\\d+', path):
@@ -1654,6 +1785,10 @@ class Handler(BaseHTTPRequestHandler):
                 api_import_transactions(self)
             elif path == '/api/transactions/batch':
                 api_batch_transactions(self)
+            elif path == '/api/inbox/process':
+                api_inbox_process(self)
+            elif re.fullmatch(r'/api/inbox/\d+/retry', path):
+                api_inbox_retry(self, int(path.split('/')[3]))
             elif path == '/api/transactions/check_duplicates':
                 api_check_duplicates(self)
             elif path == '/api/notes':
@@ -1691,6 +1826,8 @@ class Handler(BaseHTTPRequestHandler):
             _maybe_schedule_due_backup()
             if re.fullmatch(r'/api/notes/\d+', path):
                 api_note_delete(self, int(path.rsplit('/', 1)[1]))
+            elif re.fullmatch(r'/api/inbox/\d+', path):
+                api_inbox_delete(self, int(path.rsplit('/', 1)[1]))
             elif re.fullmatch(r'/api/transactions/\d+', path):
                 api_delete_transaction(self, int(path.rsplit('/', 1)[1]))
             else:
