@@ -123,6 +123,59 @@ class ColdStartEndpointTests(unittest.TestCase):
         self.assertEqual(json.loads(body)["inserted"], 1)
 
 
+class CardInboxTests(ColdStartEndpointTests):
+    """Payments parked in card_inbox are imported when the app asks."""
+
+    def park(self, *payloads):
+        with app.db() as conn:
+            for payload in payloads:
+                conn.execute("INSERT INTO card_inbox(payload) VALUES(?)", (payload if isinstance(payload, str) else json.dumps(payload),))
+            conn.commit()
+
+    def post(self, path):
+        status, body = self.request("POST", path, "", self.auth())
+        return status, json.loads(body)
+
+    def tx_count(self, content):
+        with app.db() as conn:
+            return conn.execute("SELECT COUNT(*) FROM transactions WHERE content=?", (content,)).fetchone()[0]
+
+    def test_inbox_requires_auth(self):
+        status, _ = self.request("POST", "/api/inbox/process", "")
+        self.assertEqual(status, 401)
+
+    def test_process_imports_valid_and_keeps_problem_rows(self):
+        good = {"date": "2026-12-01", "time": "09:10", "amount": "12,000", "card": "테스트카드", "content": "스타벅스 보관함"}
+        self.park(good, good, {"time": "09:11", "amount": 1, "card": "없는카드", "content": "오류"}, "not json")
+        status, result = self.post("/api/inbox/process")
+        self.assertEqual(status, 200)
+        self.assertEqual((result["imported"], result["duplicates"], result["errors"]), (1, 1, 2))
+        self.assertEqual(sorted(i["status"] for i in result["items"]), ["duplicate", "error", "error"])
+        self.assertEqual(self.tx_count("스타벅스 보관함"), 1)
+
+        # Opening the app again must not import anything twice.
+        status, result = self.post("/api/inbox/process")
+        self.assertEqual((result["imported"], result["duplicates"], result["errors"]), (0, 0, 0))
+        self.assertEqual(len(result["items"]), 3)
+        self.assertEqual(self.tx_count("스타벅스 보관함"), 1)
+
+        # A duplicate can be added on purpose; a broken row can be deleted.
+        duplicate = next(i for i in result["items"] if i["status"] == "duplicate")
+        broken = [i for i in result["items"] if i["status"] == "error"]
+        status, result = self.post(f"/api/inbox/{duplicate['id']}/retry")
+        self.assertEqual((status, result["imported"]), (200, 1))
+        self.assertEqual(self.tx_count("스타벅스 보관함"), 2)
+        status, result = self.post(f"/api/inbox/{broken[0]['id']}/retry")
+        self.assertEqual((result["ok"], result["errors"]), (False, 1))
+        for item in broken:
+            status, body = self.request("DELETE", f"/api/inbox/{item['id']}", headers=self.auth())
+            self.assertEqual(status, 200)
+        status, body = self.request("GET", "/api/inbox", headers=self.auth())
+        self.assertEqual(json.loads(body)["items"], [])
+        status, _ = self.post(f"/api/inbox/{duplicate['id']}/retry")
+        self.assertEqual(status, 400)
+
+
 class StartupTests(unittest.TestCase):
     def test_webauthn_not_imported_at_startup(self):
         import subprocess, sys

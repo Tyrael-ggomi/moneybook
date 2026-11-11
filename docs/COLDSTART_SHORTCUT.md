@@ -1,56 +1,70 @@
-# 카드결제 단축어 – Render 콜드스타트 대응
+# 카드결제 단축어 – 보관함 방식 (Render 콜드스타트 대응)
 
-## 서버에 추가된 것
+## 동작 방식
 
-| 항목 | 내용 |
-| --- | --- |
-| `GET/HEAD /health` (`/healthz`) | 인증·DB 없이 `ok`만 반환. 외부 핑 전용. 로그도 남기지 않음 |
-| 부팅 순서 | 포트를 먼저 열고 DB 스키마 확인은 백그라운드에서 실행. 부팅 중 DB 오류가 나도 프로세스가 죽지 않고 다음 요청에서 다시 시도 |
-| 지연 로딩 | 가장 무거운 `webauthn`(Face ID)은 Face ID를 처음 쓸 때 import |
-| 세션 검증 캐시 | 요청마다 하던 세션 비밀키 DB 조회를 메모리 캐시로 대체 |
-| `MONEYBOOK_API_TOKEN` | (선택) 단축어용 고정 토큰. `Authorization: Bearer <토큰>` 또는 `X-Moneybook-Token` 헤더. 16자 이상일 때만 켜지며, 백업/복원·Dropbox API에는 쓸 수 없음 |
-| `POST /api/transactions/batch` | 밀린 결제 일괄 업로드. 같은 파일을 여러 번 보내도 중복 저장되지 않음 |
+```
+카드결제 알림 → 단축어 → Supabase 보관함(card_inbox)   ← 잠들지 않음, 약 1초
+머니북 열기 → 서버가 보관함 검사 → 정상 내역은 지출내역에 자동 추가
+```
 
-> 참고: Render가 잠든 서비스를 깨우는 동안에는 `/health`도 똑같이 ~1분 기다립니다.
-> `/health`는 "깨우는 속도"를 바꾸는 게 아니라 **핑으로 잠들지 않게** 하기 위한 가벼운 대상입니다.
+- 단축어는 더 이상 Render 서버를 부르지 않습니다. Render가 잠들어 있어도 결제 기록이 빠지지 않습니다.
+- 머니북을 열거나 다시 화면으로 돌아올 때마다 보관함을 처리합니다.
+  - 정상: 지출내역에 추가하고 "카드결제 N건을 자동으로 추가했습니다" 표시
+  - 중복 의심(날짜·시간·금액·카드·내용이 같은 내역이 이미 있음): 추가하지 않고 화면 위 "카드결제 보관함"에 표시 → [추가] 또는 [삭제]
+  - 오류(카드 이름 없음, 날짜 없음 등): 사유와 함께 표시 → 카드·규칙을 고친 뒤 [재시도] 또는 [삭제]
+- 카테고리는 자동분류 규칙 → 없으면 `미정`.
 
-## 1. cron-job.org 핑
+## 설정 순서
 
-- URL: `https://<서비스>.onrender.com/health`, 메서드 GET (또는 HEAD)
-- 주기: 10분 (15분보다 짧게)
-- 시간대: Asia/Seoul, 시간 7–23시만 선택 (1–7시 사이는 핑 없음)
-- 예상 사용량: 하루 약 18시간 × 31일 ≈ 560시간 (750시간 한도)
-  - 핑이 없는 시간에도 직접 접속하면 15분씩 추가되니, 같은 워크스페이스의 다른 무료 서비스는 정리해 두세요.
+### 1. 배포
+PR을 main에 합쳐 Render에 배포하고 머니북을 한 번 엽니다. 이때 서버가 `card_inbox` 테이블을 만듭니다.
 
-## 2. 단축어 순서 (유실 방지)
+### 2. Supabase 권한 (SQL Editor에서 한 번 실행)
+단축어가 쓰는 공개 키(anon)로는 **보관함에 넣기만** 가능하고, 읽기·수정은 못 하게 합니다.
 
-단축어에는 오류 처리가 없으므로 **서버 호출보다 먼저 파일에 기록**합니다.
+```sql
+alter table public.card_inbox enable row level security;
+revoke all on public.card_inbox from anon, authenticated;
+grant insert (payload) on public.card_inbox to anon;
+grant usage on sequence public.card_inbox_id_seq to anon;
+create policy card_inbox_insert on public.card_inbox
+  for insert to anon with check (pg_column_size(payload) < 2000);
+notify pgrst, 'reload schema';
+```
 
-1. 알림 내용 파싱 → 사전 만들기: `date`(yyyy-MM-dd, 필수), `time`(HH:mm), `amount`, `card`(카드 이름) 또는 `card_id`, `content`
-2. **파일에 추가**: iCloud Drive `/단축어/moneybook-queue.txt`, 사전을 텍스트(JSON 한 줄)로, "새로운 줄에 추가" 켜기
-3. URL 내용 가져오기: `POST /api/transactions` (기존과 동일)
+**함께 확인하세요.** 아래 결과에서 `rowsecurity`가 `false`인 테이블은 anon 키만 있으면 누구나 읽을 수 있습니다.
+머니북 서버는 DB에 직접 접속하므로 RLS를 켜도 영향을 받지 않습니다.
 
-서버가 잠들어 3번이 실패해도 2번에 기록이 남아 있습니다.
+```sql
+select tablename, rowsecurity from pg_tables where schemaname = 'public';
+-- false인 테이블마다: alter table public.<테이블> enable row level security;
+```
 
-## 3. 밀린 내역 일괄 업로드 단축어
+### 3. 단축어 수정
+"URL 내용 가져오기" 동작을 다음으로 바꿉니다.
 
-1. 파일 가져오기: `moneybook-queue.txt`
-2. URL 내용 가져오기
-   - URL: `https://<서비스>.onrender.com/api/transactions/batch`
-   - 메서드: POST, 헤더 `Authorization: Bearer <MONEYBOOK_API_TOKEN>`, `Content-Type: text/plain`
-   - 요청 본문: 파일 (1번 결과)
-3. 결과 보기 → `inserted`/`duplicates`/`errors` 확인. `errors`가 0이면 파일을 비워도 됩니다
-   (비우지 않아도 다음 업로드 때 이미 있는 내역은 `duplicate`로 건너뜀).
-
-### 입력 형식
-
-- JSON Lines(한 줄에 객체 하나), JSON 배열, `{"rows": [...]}` 모두 가능. 빈 줄은 무시. 최대 500건
-- 필드: `date`(필수), `time`, `amount`, `card_id` 또는 `card`, `content`, 선택: `category_id`/`category`, `user_percent`, `installment_months`
-- 카테고리를 안 주면 자동분류 규칙 → 없으면 `미정`
-- 중복 판단: 날짜·시간·금액·카드·내용이 모두 같은 내역. 업로드 안에 같은 줄이 N개면 최대 N건까지 저장
-  (같은 가게에서 같은 분에 같은 금액을 두 번 결제한 경우도 보존)
-- 형식이 잘못된 줄은 줄 번호와 함께 `error`로 보고되고 나머지는 정상 저장
+- URL: `https://<프로젝트 ID>.supabase.co/rest/v1/card_inbox`
+- 메서드: POST
+- 헤더
+  - `apikey`: `<anon(publishable) 키>` (Supabase → Project Settings → API Keys)
+  - `Authorization`: `Bearer <같은 키>`
+  - `Content-Type`: `application/json`
+  - `Prefer`: `return=minimal`
+- 요청 본문(JSON): `payload` 필드를 **사전**으로 만들고 그 안에
+  - `date` (yyyy-MM-dd, 필수), `time` (HH:mm), `amount`, `card`(머니북의 카드 이름과 동일) 또는 `card_id`, `content`
+  - 선택: `category`/`category_id`, `user_percent`, `installment_months`
 
 ```json
-{"date":"2026-11-10","time":"12:30","amount":"4,500","card":"현대카드","content":"스타벅스 강남"}
+{"payload": {"date": "2026-11-10", "time": "12:30", "amount": "4,500", "card": "현대카드", "content": "스타벅스 강남"}}
 ```
+
+성공하면 응답 본문 없이 끝납니다(HTTP 201).
+
+### 4. 확인
+결제 1건(또는 단축어 수동 실행) 후 머니북을 열어 자동 추가 알림과 지출내역을 확인합니다.
+
+## 참고: 서버에 남아 있는 기능
+- `GET/HEAD /health`: 인증·DB 없이 `ok` 반환. 보관함 방식에서는 **핑이 필수가 아닙니다.** 머니북을 열 때 1분 기다리는 것이 싫을 때만 cron-job.org로 10분 간격 핑(Asia/Seoul 7–23시, 월 약 560시간)을 걸어 두세요.
+- `POST /api/transactions/batch`: JSON Lines 파일 일괄 업로드(중복 건너뜀). `MONEYBOOK_API_TOKEN`(16자 이상)을 Render 환경 변수에 넣으면 `Authorization: Bearer <토큰>`으로 호출할 수 있습니다.
+- 보관함 API(로그인 필요): `POST /api/inbox/process`, `GET /api/inbox`, `POST /api/inbox/<id>/retry`, `DELETE /api/inbox/<id>`
+- 가져온 보관 내역은 30일 뒤 보관함에서 자동 삭제됩니다(지출내역은 그대로).
