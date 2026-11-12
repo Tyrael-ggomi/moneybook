@@ -50,7 +50,19 @@ select tablename, rowsecurity from pg_tables where schemaname = 'public';
   - `Authorization`: `Bearer <같은 키>`
   - `Content-Type`: `application/json`
   - `Prefer`: `return=minimal`
-- 요청 본문(JSON): `payload` 필드를 **사전**으로 만들고 그 안에
+- 요청 본문(JSON): `payload` 필드를 **사전**으로 만들고 그 안에 둘 중 하나를 넣습니다.
+
+**방법 A (추천): 알림 원문 그대로** — 사전 안에 텍스트 필드 `raw` 하나만 만들고, 값에 카드 알림 전체 내용을 넣습니다. 날짜·금액·가맹점·카드는 서버가 해석합니다.
+
+```json
+{"payload": {"raw": "현대 ZERO 승인\n1,300원 일시불, 11/12 7:34\n씨유CU대구공항국제선점 누적597,194원"}}
+```
+
+- 카드 이름은 알림의 "현대 ZERO"와 머니북 카드 이름을 띄어쓰기·"카드" 글자를 빼고 비교합니다(예: `현대카드 ZERO`와 연결). 연결이 안 되면 보관함에 오류로 남고, 등록된 카드 이름을 알려 줍니다.
+- 할부(`03개월`)와 취소(음수 금액)도 읽습니다. 연도는 알림을 받은 날 기준입니다.
+- **해외승인**(예: `JPY 3,600.00`)은 머니북을 여는 시점의 환율로 원화 금액을 계산해 추가하고, 내용에 외화 금액을 함께 적습니다(예: `KIXLIMOUSINEBUS (JPY 3,600.00)`). 환율은 무료 공개 환율 서비스에서 가져오며 카드사 수수료는 포함하지 않으므로 청구 금액과 조금 다릅니다. 환율을 가져오지 못하면 보관함에 남고 [재시도] 또는 [직접 입력]으로 처리합니다.
+
+**방법 B: 단축어가 나눠서 전송**
   - `date` (yyyy-MM-dd, 필수), `time` (HH:mm), `amount`, `card`(머니북의 카드 이름과 동일) 또는 `card_id`, `content`
   - 선택: `category`/`category_id`, `user_percent`, `installment_months`
 

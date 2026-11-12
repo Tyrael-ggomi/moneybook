@@ -31,7 +31,7 @@ function render(d){const visible=new Set(d.transactions.map(t=>t.id));selectedTx
 async function bulkCategory(){if(!selectedTx.size)return;$('bulkCategorySelect').innerHTML=boot.categories.map(x=>`<option value="${x.id}">${esc(x.name)}</option>`).join('');$('bulkCategoryModal').classList.remove('hidden')}
 async function bulkCategorySave(){try{const r=await fetch('/api/transactions/bulk_update',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:[...selectedTx],category_id:$('bulkCategorySelect').value})}),d=await r.json();if(!r.ok||!d.ok)throw Error(d.error);selectedTx.clear();$('bulkCategoryModal').classList.add('hidden');msg(`${d.count}건의 카테고리를 변경했습니다.`,true);await list()}catch(e){msg(e.message)}}
 async function bulkDelete(){if(!selectedTx.size)return;if(!confirm(`${selectedTx.size}건의 지출 내역을 삭제할까요?`))return;try{const r=await fetch('/api/transactions/bulk_delete',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ids:[...selectedTx]})}),d=await r.json();if(!r.ok||!d.ok)throw Error(d.error);selectedTx.clear();msg(`${d.count}건을 삭제했습니다.`,true);await list()}catch(e){msg(e.message)}}
-async function submit(e){e.preventDefault();let payload={date:$('date').value,time:$('time').value,amount:$('amount').value,card_id:$('card').value,category_id:$('category').value||null,content:$('content').value,user_percent:+$('ratio').value,installment_months:+$('installment').value};try{let r=await fetch('/api/transactions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),d=await r.json();if(!r.ok||!d.ok)throw Error(d.error);msg('저장했습니다.',true);reset(false);await list()}catch(e){msg(e.message)}}
+async function submit(e){e.preventDefault();let payload={date:$('date').value,time:$('time').value,amount:$('amount').value,card_id:$('card').value,category_id:$('category').value||null,content:$('content').value,user_percent:+$('ratio').value,installment_months:+$('installment').value};try{let r=await fetch('/api/transactions',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)}),d=await r.json();if(!r.ok||!d.ok)throw Error(d.error);msg('저장했습니다.',true);reset(false);await list();await inboxFixDone()}catch(e){msg(e.message)}}
 function reset(clear=true){$('date').value=new Date().toISOString().slice(0,10);$('time').value=new Date().toTimeString().slice(0,5);$('amount').value='';$('content').value='';$('category').value='';$('ratio').value=50;$('installment').value=1;ratio();if(clear)msg('');$('amount').focus()}
 async function openEdit(id,provided=null){let t=provided||lastTransactions.find(x=>x.id===id);if(!t){try{let r=await fetch('/api/transactions/'+encodeURIComponent(id));let d=await r.json();if(!r.ok)throw Error(d.error);t=d}catch(e){msg(e.message);return}}editingId=id;const editDate=String(t.tx_date??t.date??'').slice(0,10);const editTime=String(t.tx_time??t.time??'').slice(0,5);$('editDate').value=/^\d{4}-\d{2}-\d{2}$/.test(editDate)?editDate:'';$('editTime').value=/^\d{2}:\d{2}$/.test(editTime)?editTime:'';$('editAmount').value=Number(t.amount).toLocaleString('ko-KR');$('editCard').value=t.card_id;$('editCategory').value=t.category_id||'';$('editContent').value=t.content||'';$('editRatio').value=t.user_percent;$('editInstallment').value=t.installment_months;eratio();emsg('');$('editModal').classList.remove('hidden')}
 function closeEdit(){editingId=null;$('editModal').classList.add('hidden')}
@@ -429,12 +429,23 @@ $('loadMoreBtn').onclick=()=>{listLimit+=100;list().catch(e=>msg(e.message))};
 
 // Card payment inbox: payments parked in Supabase by the iOS Shortcut are
 // imported whenever the app is opened or brought back to the foreground.
-let inboxBusy=false;
+let inboxBusy=false,inboxItems=[],inboxFixId=null;
+const cardKey=s=>String(s||'').replace(/\s+|카드/g,'').toUpperCase();
+function inboxFill(id){
+  const item=inboxItems.find(i=>String(i.id)===String(id));if(!item)return;const p=item.payload||{};
+  if(p.date)$('date').value=p.date;if(p.time)$('time').value=p.time;
+  $('amount').value=p.amount===undefined||p.amount===null?'':String(p.amount);if($('amount').value)fmt('amount');
+  $('content').value=p.content||'';if(p.installment_months)$('installment').value=p.installment_months;
+  if(p.card_id)$('card').value=p.card_id;else if(p.card){const want=cardKey(p.card);const o=[...$('card').options].find(o=>cardKey(o.textContent)===want)||[...$('card').options].find(o=>{const k=cardKey(o.textContent);return k&&(k.includes(want)||want.includes(k))});if(o)$('card').value=o.value}
+  inboxFixId=item.id;msg('보관함 내역을 불러왔습니다. 금액·카드를 확인하고 저장하세요.',true);
+  $('expenseForm').scrollIntoView({behavior:'smooth',block:'start'});$('amount').focus();
+}
+async function inboxFixDone(){if(!inboxFixId)return;const id=inboxFixId;inboxFixId=null;try{const d=await inboxRequest(`/api/inbox/${id}`,'DELETE');if(d)renderInbox(d,'')}catch(e){}}
 function inboxLine(p){if(!p||typeof p!=='object')return esc(String(p??''));const amount=p.amount===undefined||p.amount===''?'':String(p.amount).replace(/원$/,'')+'원';return esc([p.date,p.time,p.card,amount,p.content].filter(v=>v!==undefined&&v!==null&&v!=='').join(' · '))}
 function renderInbox(d,notice){
-  const items=d.items||[];
+  const items=d.items||[];inboxItems=items;
   $('inboxNotice').textContent=notice||'';$('inboxNotice').classList.toggle('hidden',!notice);
-  $('inboxList').innerHTML=items.map(i=>`<div class="inboxItem"><div class="inboxMain"><div class="inboxText">${inboxLine(i.payload)}</div><div class="inboxWhy">${i.status==='duplicate'?'중복 의심':'오류'}: ${esc(i.error||'')}</div></div><button type="button" data-inbox-retry="${i.id}">${i.status==='duplicate'?'추가':'재시도'}</button><button type="button" class="danger" data-inbox-delete="${i.id}">삭제</button></div>`).join('');
+  $('inboxList').innerHTML=items.map(i=>`<div class="inboxItem"><div class="inboxMain"><div class="inboxText">${inboxLine(i.payload)}</div><div class="inboxWhy">${i.status==='duplicate'?'중복 의심':'오류'}: ${esc(i.error||'')}</div></div>${i.status==='error'?`<button type="button" data-inbox-fill="${i.id}">직접 입력</button>`:''}<button type="button" data-inbox-retry="${i.id}">${i.status==='duplicate'?'추가':'재시도'}</button><button type="button" class="danger" data-inbox-delete="${i.id}">삭제</button></div>`).join('');
   $('inboxCard').classList.toggle('hidden',!notice&&!items.length);
 }
 async function inboxRequest(url,method){const r=await fetch(url,{method,cache:'no-store'});const d=await r.json();if(r.status===401)return null;if(!r.ok&&!d.items)throw Error(d.error||'보관함을 처리하지 못했습니다.');return d}
@@ -446,7 +457,7 @@ async function processInbox(){
   }catch(e){}finally{inboxBusy=false}
 }
 $('inboxList').onclick=async e=>{
-  const b=e.target.closest('button');if(!b)return;const retry=b.dataset.inboxRetry,del=b.dataset.inboxDelete;if(!retry&&!del)return;
+  const b=e.target.closest('button');if(!b)return;if(b.dataset.inboxFill){inboxFill(b.dataset.inboxFill);return}const retry=b.dataset.inboxRetry,del=b.dataset.inboxDelete;if(!retry&&!del)return;
   if(del&&!confirm('이 내역을 보관함에서 삭제할까요?'))return;
   b.disabled=true;
   try{const d=await inboxRequest(retry?`/api/inbox/${retry}/retry`:`/api/inbox/${del}`,retry?'POST':'DELETE');if(!d)return;
