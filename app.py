@@ -28,7 +28,7 @@ try:
 except ImportError:
     psycopg = None
     dict_row = None
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -1235,6 +1235,122 @@ def _inbox_payload(value):
     except (TypeError,ValueError): return value
 
 
+KST_OFFSET_SECONDS=9*60*60
+_NOTI_AMOUNT_KRW=re.compile(r'(-?[\d,]+)\s*원\s*(일시불|(\d{1,2})\s*개월)?\s*,?\s*(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})')
+_NOTI_AMOUNT_FOREIGN=re.compile(r'\b([A-Z]{3})\s*([\d,]+(?:\.\d+)?)\s*,?\s*(\d{1,2})/(\d{1,2})\s+(\d{1,2}):(\d{2})')
+
+
+def _inbox_received_date(value):
+    """Date (KST) the notification reached the inbox; used to fill in the year."""
+    if isinstance(value,datetime):
+        ts=value.timestamp() if value.tzinfo else value.replace(tzinfo=timezone.utc).timestamp()
+    else:
+        try: ts=datetime.fromisoformat(str(value).replace(' ','T')[:19]).replace(tzinfo=timezone.utc).timestamp()
+        except ValueError: ts=time.time()
+    return datetime.fromtimestamp(ts+KST_OFFSET_SECONDS,timezone.utc).date()
+
+
+def parse_card_notification(text,received=None):
+    """Parse a card-company push notification into transaction fields.
+
+    Handles the layouts the Shortcut forwards as-is, e.g.
+
+        현대 ZERO 승인                      현대카드
+        1,300원 일시불, 11/12 7:34          ㅇㅇㅇ님, 현대 알파벳T 해외승인
+        씨유CU대구공항국제선점 누적597,194원   JPY 3,600.00 11/12 9:55
+                                           KIXLIMOUSINEBUS
+
+    Returns a dict with date/time/card/content and either `amount` (KRW) or
+    `currency` + `foreign_amount` (foreign approvals have no KRW amount).
+    """
+    lines=[l.strip() for l in str(text or '').replace('\r','\n').split('\n') if l.strip()]
+    if not lines: raise ValueError('알림 내용이 비어 있습니다.')
+    head_i=next((i for i,l in enumerate(lines) if '승인' in l or '취소' in l),None)
+    amount_i=next((i for i,l in enumerate(lines) if _NOTI_AMOUNT_KRW.search(l) or _NOTI_AMOUNT_FOREIGN.search(l)),None)
+    if head_i is None or amount_i is None: raise ValueError('카드 승인 알림 형식을 알 수 없습니다.')
+    head=lines[head_i]
+    cancelled='취소' in head
+    card=re.sub(r'^.*님\s*,?\s*','',head)
+    card=re.sub(r'\s*(해외)?\s*(승인)?\s*(취소)?\s*$','',card).strip()
+    out={'card':card,'cancelled':cancelled}
+    m=_NOTI_AMOUNT_KRW.search(lines[amount_i])
+    if m:
+        amount=normalize_amount(m.group(1))
+        out['amount']=-abs(amount) if cancelled else amount
+        out['installment_months']=int(m.group(3)) if m.group(3) else 1
+        month,day,hh,mm=(int(x) for x in m.group(4,5,6,7))
+    else:
+        m=_NOTI_AMOUNT_FOREIGN.search(lines[amount_i])
+        out['currency']=m.group(1); out['foreign_amount']=m.group(2)
+        month,day,hh,mm=(int(x) for x in m.group(3,4,5,6))
+    received=received or _inbox_received_date(None)
+    year=received.year
+    try:
+        tx=date(year,month,day)
+        # "12/31" arriving on Jan 1 belongs to the previous year.
+        if (tx-received).days>2: tx=date(year-1,month,day)
+    except ValueError: raise ValueError('알림의 날짜를 읽을 수 없습니다.')
+    out['date']=tx.isoformat(); out['time']=f'{hh:02d}:{mm:02d}'
+    rest=[l for i,l in enumerate(lines) if i>amount_i]
+    content=re.sub(r'\s*누적\s*-?[\d,]+\s*원.*$','',rest[0]).strip() if rest else ''
+    out['content']=content
+    return out
+
+
+def _card_key(name):
+    return re.sub(r'\s+|카드','',str(name or '')).upper()
+
+
+def _match_card_id(conn,name):
+    """Find the Moneybook card for a name as written in a notification
+    ('현대 ZERO' matches a card called '현대카드 ZERO')."""
+    want=_card_key(name)
+    if not want: raise ValueError('알림에서 카드 이름을 찾을 수 없습니다.')
+    cards=conn.execute("SELECT id,name FROM cards WHERE active=1 ORDER BY sort_order,id").fetchall()
+    exact=[c for c in cards if _card_key(c['name'])==want]
+    if exact: return exact[0]['id']
+    partial=[c for c in cards if _card_key(c['name']) and (_card_key(c['name']) in want or want in _card_key(c['name']))]
+    if len(partial)==1: return partial[0]['id']
+    names=', '.join(str(c['name']) for c in cards)
+    raise ValueError(f"카드 '{name}'을(를) 머니북 카드와 연결할 수 없습니다. (등록된 카드: {names})")
+
+
+def _inbox_raw_text(payload):
+    """Return the raw notification text if the Shortcut sent one instead of
+    already-separated fields."""
+    if isinstance(payload,str): return payload
+    if isinstance(payload,dict) and payload.get('amount') in (None,''):
+        for key in ('raw','text','알림'):
+            if str(payload.get(key) or '').strip(): return str(payload[key])
+    return None
+
+
+def _inbox_row(conn,payload,received_at):
+    """Turn an inbox payload into a row for _prepare_queued_row."""
+    raw=_inbox_raw_text(payload)
+    if raw is None: return payload
+    parsed=parse_card_notification(raw,_inbox_received_date(received_at))
+    if 'amount' not in parsed:
+        raise ValueError(f"해외승인 {parsed['currency']} {parsed['foreign_amount']}: 원화 금액을 알 수 없어 직접 입력이 필요합니다.")
+    row={k:parsed[k] for k in ('date','time','amount','content','installment_months')}
+    row['card_id']=_match_card_id(conn,parsed['card'])
+    if isinstance(payload,dict):
+        for key in ('category','category_id','user_percent'):
+            if payload.get(key) not in (None,''): row[key]=payload[key]
+    return row
+
+
+def _inbox_preview(payload,received_at):
+    """Best-effort fields for showing/prefilling a problem row in the app."""
+    raw=_inbox_raw_text(payload)
+    if raw is None: return payload if isinstance(payload,dict) else {}
+    try: parsed=parse_card_notification(raw,_inbox_received_date(received_at))
+    except Exception: return {'content':raw.strip()[:200]}
+    if 'amount' not in parsed:
+        parsed['content']=(parsed['content']+f" ({parsed['currency']} {parsed['foreign_amount']})").strip()
+    return parsed
+
+
 def process_card_inbox(conn,only_id=None,force=False):
     """Move waiting card payments from card_inbox into transactions.
 
@@ -1246,16 +1362,16 @@ def process_card_inbox(conn,only_id=None,force=False):
     `force` adds it even if it looks like a duplicate.
     """
     if only_id is None:
-        claimed=conn.execute("UPDATE card_inbox SET status='processing' WHERE status='pending' RETURNING id,payload").fetchall()
+        claimed=conn.execute("UPDATE card_inbox SET status='processing' WHERE status='pending' RETURNING id,payload,received_at").fetchall()
     else:
-        claimed=conn.execute("UPDATE card_inbox SET status='processing' WHERE id=? AND status IN ('duplicate','error','pending') RETURNING id,payload",(only_id,)).fetchall()
+        claimed=conn.execute("UPDATE card_inbox SET status='processing' WHERE id=? AND status IN ('duplicate','error','pending') RETURNING id,payload,received_at",(only_id,)).fetchall()
     counts={'imported':0,'duplicates':0,'errors':0}
     if not claimed: return counts
     fallback_id=_fallback_category_id(conn); now=int(time.time())
     for item in sorted(claimed,key=lambda r:r['id']):
         conn.execute("SAVEPOINT inbox_row")
         try:
-            values=_prepare_queued_row(conn,_inbox_payload(item['payload']),fallback_id)
+            values=_prepare_queued_row(conn,_inbox_row(conn,_inbox_payload(item['payload']),item['received_at']),fallback_id)
             key=values[:4]+(values[5],)  # date, time, amount, card_id, content
             existing=conn.execute("SELECT id FROM transactions WHERE tx_date=? AND tx_time=? AND amount=? AND card_id=? AND content=? LIMIT 1",key).fetchone()
             if existing and not force:
@@ -1276,7 +1392,7 @@ def process_card_inbox(conn,only_id=None,force=False):
 
 def _inbox_problem_items(conn):
     rows=conn.execute("SELECT id,received_at,payload,status,error FROM card_inbox WHERE status IN ('duplicate','error') ORDER BY id").fetchall()
-    return [{'id':r['id'],'received_at':r['received_at'],'payload':_inbox_payload(r['payload']),'status':r['status'],'error':r['error']} for r in rows]
+    return [{'id':r['id'],'received_at':r['received_at'],'payload':_inbox_preview(_inbox_payload(r['payload']),r['received_at']),'status':r['status'],'error':r['error']} for r in rows]
 
 
 def api_inbox_process(handler):

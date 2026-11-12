@@ -176,6 +176,40 @@ class CardInboxTests(ColdStartEndpointTests):
         self.assertEqual(status, 400)
 
 
+class RawNotificationTests(CardInboxTests):
+    """The Shortcut may forward the notification text untouched."""
+
+    DOMESTIC = "테스트 승인\n1,300원 일시불, 11/12 7:34\n씨유CU대구공항국제선점 누적597,194원"
+    FOREIGN = "현대카드\nㅇㅇㅇ님, 테스트 해외승인\nJPY 3,600.00 11/12 9:55\nKIXLIMOUSINEBUS"
+
+    def test_parse_layouts(self):
+        from datetime import date
+        got = app.parse_card_notification(self.DOMESTIC.replace("테스트", "현대 ZERO"), date(2026, 11, 12))
+        self.assertEqual((got["card"], got["amount"], got["date"], got["time"], got["content"], got["installment_months"]),
+                         ("현대 ZERO", 1300, "2026-11-12", "07:34", "씨유CU대구공항국제선점", 1))
+        got = app.parse_card_notification(self.FOREIGN, date(2026, 11, 12))
+        self.assertEqual((got["card"], got["currency"], got["foreign_amount"], got["content"]), ("테스트", "JPY", "3,600.00", "KIXLIMOUSINEBUS"))
+        self.assertNotIn("amount", got)
+        got = app.parse_card_notification("현대 ZERO 승인취소\n45,000원 03개월, 12/31 23:50\n가게", date(2027, 1, 1))
+        self.assertEqual((got["amount"], got["installment_months"], got["date"]), (-45000, 3, "2026-12-31"))
+        with self.assertRaises(ValueError):
+            app.parse_card_notification("광고 알림입니다", date(2026, 11, 12))
+
+    def test_raw_notifications_are_imported_or_held(self):
+        self.park({"raw": self.DOMESTIC}, {"raw": self.FOREIGN}, {"raw": self.DOMESTIC.replace("테스트", "모르는카드")})
+        status, result = self.post("/api/inbox/process")
+        self.assertEqual((result["imported"], result["errors"]), (1, 2))
+        with app.db() as conn:
+            row = conn.execute("SELECT tx_time,amount,card_id FROM transactions WHERE content='씨유CU대구공항국제선점'").fetchone()
+        self.assertEqual((row["tx_time"], row["amount"], row["card_id"]), ("07:34", 1300, 1))
+        foreign = next(i for i in result["items"] if "해외승인" in i["error"])
+        self.assertEqual(foreign["payload"]["content"], "KIXLIMOUSINEBUS (JPY 3,600.00)")
+        self.assertEqual(foreign["payload"]["time"], "09:55")
+        self.assertTrue(any("모르는카드" in i["error"] for i in result["items"]))
+        for item in result["items"]:
+            self.request("DELETE", f"/api/inbox/{item['id']}", headers=self.auth())
+
+
 class StartupTests(unittest.TestCase):
     def test_webauthn_not_imported_at_startup(self):
         import subprocess, sys
