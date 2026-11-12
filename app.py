@@ -1301,18 +1301,42 @@ def _card_key(name):
     return re.sub(r'\s+|카드','',str(name or '')).upper()
 
 
+CARD_ALIASES_KEY='card_aliases'
+CARD_LINK_ERROR='머니북 카드와 연결할 수 없습니다'
+
+
+def _card_aliases(conn):
+    """{normalised notification card name: card id}, saved in settings."""
+    row=conn.execute("SELECT value FROM settings WHERE key=?",(CARD_ALIASES_KEY,)).fetchone()
+    try: data=json.loads(row['value']) if row else {}
+    except (TypeError,ValueError): data={}
+    out={}
+    for k,v in (data.items() if isinstance(data,dict) else []):
+        try: out[str(k)]=int(v)
+        except (TypeError,ValueError): pass
+    return out
+
+
+def _save_card_alias(conn,name,card_id):
+    aliases=_card_aliases(conn); aliases[_card_key(name)]=int(card_id)
+    conn.execute("INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",(CARD_ALIASES_KEY,json.dumps(aliases,ensure_ascii=False)))
+
+
 def _match_card_id(conn,name):
     """Find the Moneybook card for a name as written in a notification
     ('현대 ZERO' matches a card called '현대카드 ZERO')."""
     want=_card_key(name)
     if not want: raise ValueError('알림에서 카드 이름을 찾을 수 없습니다.')
     cards=conn.execute("SELECT id,name FROM cards WHERE active=1 ORDER BY sort_order,id").fetchall()
+    # A link the user chose earlier in the inbox wins over name guessing.
+    linked=_card_aliases(conn).get(want)
+    if linked is not None and any(c['id']==linked for c in cards): return linked
     exact=[c for c in cards if _card_key(c['name'])==want]
     if exact: return exact[0]['id']
     partial=[c for c in cards if _card_key(c['name']) and (_card_key(c['name']) in want or want in _card_key(c['name']))]
     if len(partial)==1: return partial[0]['id']
     names=', '.join(str(c['name']) for c in cards)
-    raise ValueError(f"카드 '{name}'을(를) 머니북 카드와 연결할 수 없습니다. (등록된 카드: {names})")
+    raise ValueError(f"카드 '{name}'을(를) {CARD_LINK_ERROR}. (등록된 카드: {names})")
 
 
 def _inbox_raw_text(payload):
@@ -1422,7 +1446,7 @@ def process_card_inbox(conn,only_id=None,force=False):
 
 def _inbox_problem_items(conn):
     rows=conn.execute("SELECT id,received_at,payload,status,error FROM card_inbox WHERE status IN ('duplicate','error') ORDER BY id").fetchall()
-    return [{'id':r['id'],'received_at':r['received_at'],'payload':_inbox_preview(_inbox_payload(r['payload']),r['received_at']),'status':r['status'],'error':r['error']} for r in rows]
+    return [{'id':r['id'],'received_at':r['received_at'],'payload':_inbox_preview(_inbox_payload(r['payload']),r['received_at']),'status':r['status'],'error':r['error'],'needs_card':r['status']=='error' and CARD_LINK_ERROR in str(r['error'] or '')} for r in rows]
 
 
 def api_inbox_process(handler):
@@ -1446,6 +1470,26 @@ def api_inbox_retry(handler,item_id):
         conn.commit()
     if not any(counts.values()): raise ValueError('보관함에서 해당 내역을 찾을 수 없습니다.')
     json_response(handler,{'ok':counts['errors']==0,**counts,'items':items})
+
+
+def api_inbox_link_card(handler,item_id):
+    """Remember which Moneybook card a notification's card name means, then
+    re-run every inbox row that was waiting on a card link."""
+    data=parse_body(handler)
+    card_id=int(data.get('card_id') or 0)
+    with db() as conn:
+        if not conn.execute("SELECT id FROM cards WHERE id=? AND active=1",(card_id,)).fetchone(): raise ValueError('사용할 수 없는 카드입니다.')
+        item=conn.execute("SELECT payload,received_at FROM card_inbox WHERE id=? AND status='error'",(item_id,)).fetchone()
+        if not item: raise ValueError('보관함에서 해당 내역을 찾을 수 없습니다.')
+        raw=_inbox_raw_text(_inbox_payload(item['payload']))
+        if raw is None: raise ValueError('알림 원문이 없는 내역은 카드를 연결할 수 없습니다.')
+        name=parse_card_notification(raw,_inbox_received_date(item['received_at']))['card']
+        _save_card_alias(conn,name,card_id)
+        conn.execute("UPDATE card_inbox SET status='pending' WHERE status='error' AND error LIKE ?",('%'+CARD_LINK_ERROR+'%',))
+        counts=process_card_inbox(conn)
+        items=_inbox_problem_items(conn)
+        conn.commit()
+    json_response(handler,{'ok':True,**counts,'items':items})
 
 
 def api_inbox_delete(handler,item_id):
@@ -1933,6 +1977,8 @@ class Handler(BaseHTTPRequestHandler):
                 api_batch_transactions(self)
             elif path == '/api/inbox/process':
                 api_inbox_process(self)
+            elif re.fullmatch(r'/api/inbox/\d+/card', path):
+                api_inbox_link_card(self, int(path.split('/')[3]))
             elif re.fullmatch(r'/api/inbox/\d+/retry', path):
                 api_inbox_retry(self, int(path.split('/')[3]))
             elif path == '/api/transactions/check_duplicates':

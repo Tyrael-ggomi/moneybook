@@ -218,6 +218,23 @@ class RawNotificationTests(CardInboxTests):
         for item in result["items"]:
             self.request("DELETE", f"/api/inbox/{item['id']}", headers=self.auth())
 
+    def test_linking_a_card_is_remembered(self):
+        nick = self.DOMESTIC.replace("테스트 승인", "현대 알파벳T 승인").replace("씨유CU대구공항국제선점", "카드연결가게")
+        self.park({"raw": nick}, {"raw": nick.replace("7:34", "7:35")})
+        status, result = self.post("/api/inbox/process")
+        self.assertEqual(result["errors"], 2)
+        self.assertTrue(all(i["needs_card"] for i in result["items"]))
+        headers = {**self.auth(), "Content-Type": "application/json"}
+        status, body = self.request("POST", f"/api/inbox/{result['items'][0]['id']}/card", json.dumps({"card_id": 999}), headers)
+        self.assertEqual(status, 400)
+        status, body = self.request("POST", f"/api/inbox/{result['items'][0]['id']}/card", json.dumps({"card_id": 1}), headers)
+        linked = json.loads(body)
+        self.assertEqual((status, linked["imported"], linked["items"]), (200, 2, []))
+        # The next notification with that card name needs no help.
+        self.park({"raw": nick.replace("7:34", "7:36")})
+        status, result = self.post("/api/inbox/process")
+        self.assertEqual((result["imported"], result["errors"]), (1, 0))
+
     def test_fx_rate_uses_cache_and_fallback(self):
         calls = []
 
