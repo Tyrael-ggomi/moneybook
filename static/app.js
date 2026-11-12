@@ -441,11 +441,11 @@ function inboxFill(id){
   $('expenseForm').scrollIntoView({behavior:'smooth',block:'start'});$('amount').focus();
 }
 async function inboxFixDone(){if(!inboxFixId)return;const id=inboxFixId;inboxFixId=null;try{const d=await inboxRequest(`/api/inbox/${id}`,'DELETE');if(d)renderInbox(d,'')}catch(e){}}
-function inboxLine(p){if(!p||typeof p!=='object')return esc(String(p??''));const amount=p.amount===undefined||p.amount===''?'':String(p.amount).replace(/원$/,'')+'원';return esc([p.date,p.time,p.card,amount,p.content].filter(v=>v!==undefined&&v!==null&&v!=='').join(' · '))}
+function inboxLine(p){if(!p||typeof p!=='object')return esc(String(p??''));const amount=p.amount===undefined||p.amount===''?'':(typeof p.amount==='number'?p.amount.toLocaleString('ko-KR'):String(p.amount).replace(/원$/,''))+'원';return esc([p.date,p.time,p.card,amount,p.content].filter(v=>v!==undefined&&v!==null&&v!=='').join(' · '))}
 function renderInbox(d,notice){
   const items=d.items||[];inboxItems=items;
   $('inboxNotice').textContent=notice||'';$('inboxNotice').classList.toggle('hidden',!notice);
-  $('inboxList').innerHTML=items.map(i=>`<div class="inboxItem"><div class="inboxMain"><div class="inboxText">${inboxLine(i.payload)}</div><div class="inboxWhy">${i.status==='duplicate'?'중복 의심':'오류'}: ${esc(i.error||'')}</div></div>${i.status==='error'?`<button type="button" data-inbox-fill="${i.id}">직접 입력</button>`:''}<button type="button" data-inbox-retry="${i.id}">${i.status==='duplicate'?'추가':'재시도'}</button><button type="button" class="danger" data-inbox-delete="${i.id}">삭제</button></div>`).join('');
+  $('inboxList').innerHTML=items.map(i=>`<div class="inboxItem"><div class="inboxMain"><div class="inboxText">${inboxLine(i.payload)}</div><div class="inboxWhy">${i.status==='duplicate'?'중복 의심':'오류'}: ${esc(i.error||'')}</div></div>${i.needs_card?`<select data-inbox-card="${i.id}" aria-label="연결할 카드"><option value="">이 알림의 카드 선택…</option>${(boot.cards||[]).map(c=>`<option value="${c.id}">${esc(c.name)}</option>`).join('')}</select><button type="button" class="primary" data-inbox-link="${i.id}">연결</button>`:''}${i.status==='error'?`<button type="button" data-inbox-fill="${i.id}">직접 입력</button>`:''}<button type="button" data-inbox-retry="${i.id}">${i.status==='duplicate'?'추가':'재시도'}</button><button type="button" class="danger" data-inbox-delete="${i.id}">삭제</button></div>`).join('');
   $('inboxCard').classList.toggle('hidden',!notice&&!items.length);
 }
 async function inboxRequest(url,method){const r=await fetch(url,{method,cache:'no-store'});const d=await r.json();if(r.status===401)return null;if(!r.ok&&!d.items)throw Error(d.error||'보관함을 처리하지 못했습니다.');return d}
@@ -457,7 +457,7 @@ async function processInbox(){
   }catch(e){}finally{inboxBusy=false}
 }
 $('inboxList').onclick=async e=>{
-  const b=e.target.closest('button');if(!b)return;if(b.dataset.inboxFill){inboxFill(b.dataset.inboxFill);return}const retry=b.dataset.inboxRetry,del=b.dataset.inboxDelete;if(!retry&&!del)return;
+  const b=e.target.closest('button');if(!b)return;if(b.dataset.inboxFill){inboxFill(b.dataset.inboxFill);return}if(b.dataset.inboxLink){const sel=$('inboxList').querySelector(`select[data-inbox-card="${b.dataset.inboxLink}"]`);if(!sel.value){alert('연결할 카드를 선택하세요.');return}b.disabled=true;try{const r=await fetch(`/api/inbox/${b.dataset.inboxLink}/card`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({card_id:+sel.value})});const d=await r.json();if(!r.ok)throw Error(d.error||'카드를 연결하지 못했습니다.');renderInbox(d,d.imported?`카드를 연결하고 ${d.imported}건을 추가했습니다. 다음부터는 자동으로 연결됩니다.`:'카드를 연결했습니다.');if(d.imported)await list()}catch(err){alert(err.message);b.disabled=false}return}const retry=b.dataset.inboxRetry,del=b.dataset.inboxDelete;if(!retry&&!del)return;
   if(del&&!confirm('이 내역을 보관함에서 삭제할까요?'))return;
   b.disabled=true;
   try{const d=await inboxRequest(retry?`/api/inbox/${retry}/retry`:`/api/inbox/${del}`,retry?'POST':'DELETE');if(!d)return;

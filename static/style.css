@@ -155,3 +155,4 @@ html,body{overflow-x:hidden}
 .backupSetupLink{border:1px solid #d1d5db;background:#fff;color:#111827;text-decoration:none}
 .backupPanel .settingsHint{line-height:1.5;margin:10px 2px 0}
 .inboxCard .listHead{margin-bottom:4px}.inboxCard .iconBtn{height:36px;width:36px;font-size:24px}.inboxItem{display:flex;align-items:center;flex-wrap:wrap;justify-content:flex-end;gap:8px;padding:10px 0;border-top:1px solid #e5e7eb}.inboxMain{flex:1 1 100%;min-width:0}.inboxText{font-size:14px;font-weight:700;word-break:break-word}.inboxWhy{font-size:12px;color:#b91c1c;margin-top:3px;word-break:break-word}.inboxItem button{height:40px;padding:0 10px;font-size:12px;white-space:nowrap}.inboxItem .danger{color:#b91c1c;border-color:#fecaca}
+.inboxItem select{flex:1 1 100%;height:40px;margin:0;font-size:14px}.inboxItem .primary{color:#fff}
