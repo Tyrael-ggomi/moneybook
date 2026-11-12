@@ -1325,13 +1325,43 @@ def _inbox_raw_text(payload):
     return None
 
 
+FX_RATE_URLS=("https://open.er-api.com/v6/latest/{cur}","https://api.frankfurter.dev/v1/latest?base={cur}&symbols=KRW")
+FX_CACHE_SECONDS=60*60
+_fx_cache={}
+
+
+def fx_rate_to_krw(currency):
+    """Current KRW price of one unit of `currency` from a free public rate
+    service (cached for an hour). Raises ValueError if no service answers."""
+    cur=str(currency).upper()
+    if not re.fullmatch(r'[A-Z]{3}',cur): raise ValueError('통화 코드를 알 수 없습니다.')
+    cached=_fx_cache.get(cur)
+    if cached and time.time()-cached[1]<FX_CACHE_SECONDS: return cached[0]
+    for url in FX_RATE_URLS:
+        try:
+            req=urllib.request.Request(url.format(cur=cur),headers={'User-Agent':'moneybook'})
+            with urllib.request.urlopen(req,timeout=5) as resp:
+                rate=float(json.loads(resp.read().decode('utf-8'))['rates']['KRW'])
+            if rate>0:
+                _fx_cache[cur]=(rate,time.time()); return rate
+        except Exception:
+            continue
+    raise ValueError(f'{cur} 환율을 가져오지 못했습니다. 잠시 후 [재시도]하거나 [직접 입력]하세요.')
+
+
 def _inbox_row(conn,payload,received_at):
     """Turn an inbox payload into a row for _prepare_queued_row."""
     raw=_inbox_raw_text(payload)
     if raw is None: return payload
     parsed=parse_card_notification(raw,_inbox_received_date(received_at))
     if 'amount' not in parsed:
-        raise ValueError(f"해외승인 {parsed['currency']} {parsed['foreign_amount']}: 원화 금액을 알 수 없어 직접 입력이 필요합니다.")
+        # Foreign approval: no KRW amount in the notification, so estimate it
+        # with the current exchange rate and keep the original in the content.
+        foreign=float(str(parsed['foreign_amount']).replace(',',''))
+        amount=int(round(foreign*fx_rate_to_krw(parsed['currency'])))
+        parsed['amount']=-amount if parsed['cancelled'] else amount
+        parsed['installment_months']=1
+        parsed['content']=(parsed['content']+f" ({parsed['currency']} {parsed['foreign_amount']})").strip()
     row={k:parsed[k] for k in ('date','time','amount','content','installment_months')}
     row['card_id']=_match_card_id(conn,parsed['card'])
     if isinstance(payload,dict):
